@@ -408,6 +408,54 @@ final class SpatialAudioTests: XCTestCase {
         XCTAssertFalse(session.hasFailed)
     }
 
+    /// Every packet of the first audio track of `path`, fed as the pipeline feeds them.
+    private func feed(_ spatial: SpatialAudio, from path: String) throws {
+        var ctx: UnsafeMutablePointer<AVFormatContext>?
+        guard avformat_open_input(&ctx, path, nil, nil) >= 0, let input = ctx else { throw XCTSkip("cannot open \(path)") }
+        defer { avformat_close_input(&ctx) }
+        guard avformat_find_stream_info(input, nil) >= 0 else { throw XCTSkip("no stream info in \(path)") }
+        let audio = av_find_best_stream(input, AVMEDIA_TYPE_AUDIO, -1, -1, nil, 0)
+        let timeBase = try XCTUnwrap(input.pointee.streams[Int(audio)]).pointee.time_base
+        var packet = av_packet_alloc()
+        defer { av_packet_free(&packet) }
+        let pkt = try XCTUnwrap(packet)
+        while av_read_frame(input, pkt) >= 0 {
+            if pkt.pointee.stream_index == audio { spatial.feed(pkt, timeBase: timeBase) }
+            av_packet_unref(pkt)
+        }
+    }
+
+    /// A new session after the input ended does not wait behind the silence the last one still pads.
+    func testANewSessionDoesNotWaitBehindTheLastOnesPadding() throws {
+        guard #available(macOS 26, *) else { throw XCTSkip("SpatialAudioBridge needs macOS 26") }
+        guard let path = ProcessInfo.processInfo.environment["TOMO_SPATIAL_SOURCE"] else { throw XCTSkip("set TOMO_SPATIAL_SOURCE") }
+        let source = try ffmpeg(["-i", path, "-map", "0:a:0", "-c", "copy", "-t", "4"], output: try derived(from: path, "audio-4s")).path
+        var ctx: UnsafeMutablePointer<AVFormatContext>?
+        guard avformat_open_input(&ctx, source, nil, nil) >= 0, let input = ctx else { throw XCTSkip("cannot open \(source)") }
+        let trueHD = try XCTUnwrap(input.pointee.streams[0]).pointee.codecpar.pointee.codec_id == AV_CODEC_ID_TRUEHD
+        avformat_close_input(&ctx)
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let spatial = SpatialAudio(prefix: "a0", streamIndex: 0, trueHD: trueHD, priming: try APACConfiguration().encoderPrimingDuration().value,
+                                   totalFrames: 20 * 60 * 48_000, dir: dir, refusalKey: "test#0")
+        defer { spatial.stop() }
+        spatial.open(atSessionStart: true)
+        try feed(spatial, from: source)
+        spatial.finish()
+        XCTAssertTrue(spin(seconds: 30) { spatial.has(2) })
+
+        spatial.reset()
+        spatial.prune(outside: 1200...1200)
+        spatial.open(atSessionStart: true)
+        let started = Date()
+        try feed(spatial, from: source)
+        spatial.finish()
+        XCTAssertTrue(spin(seconds: 10) { spatial.has(0) }, "the new session waited behind the last one's padding")
+        XCTAssertLessThan(Date().timeIntervalSince(started), 10)
+        XCTAssertNil(spatial.failure)
+    }
+
     /// Small copied video beside the source's spatial track, so the read runs ahead of the conversion.
     private func shortCopy(from path: String, length: Int) throws -> RemuxSession {
         let source = try ffmpeg(["-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25:duration=\(length)", "-i", path,

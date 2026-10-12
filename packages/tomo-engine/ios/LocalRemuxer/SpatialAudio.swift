@@ -316,6 +316,8 @@ final class SpatialAudio {
     }
 
     private func cancelSession() {
+        // A finish still padding never yields to the session's cancel(); cancelling its task stops it.
+        tail?.cancel()
         if #available(macOS 26, iOS 26, tvOS 26, *), let transcoder = transcoder {
             Task { await transcoder.cancel() }
         }
