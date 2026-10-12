@@ -87,13 +87,16 @@ extension RemuxSession {
         stateLock.lock()
         let measured = renditionBitrates
         let indexed = indexedSourcePeak ?? 0
+        let spatial = spatialAnnounced
         stateLock.unlock()
         let declaredAudio = originalAudioBandwidth(tracks)
         let videoFallback = config.primaryVideoBandwidth > 0 ? config.primaryVideoBandwidth : max(1, fallback - (splitAudio ? declaredAudio : 0))
         let primary = max(indexed, measured[""]?.peak(targetDuration: target) ?? videoFallback)
+        // A spatial rendition is never measured: it carries at least the APAC rate whatever the source declares.
         let audio = splitAudio ? tracks.enumerated().map { position, track in
             track.usesServerAudio ? Self.serverAudioBandwidth
-                : measured[audioPrefix(position)]?.peak(targetDuration: target) ?? max(0, track.bandwidth)
+                : measured[audioPrefix(position)]?.peak(targetDuration: target)
+                ?? max(0, track.bandwidth, spatial.contains(audioPrefix(position)) ? SpatialAudio.bitRate : 0)
         }.max() ?? 0 : 0
         return (max(fallback, primary + audio), primary + Self.serverAudioBandwidth)
     }
@@ -215,6 +218,8 @@ extension RemuxSession {
         let copyOnly = offered && !sourceUnusable && copyLeadsLocked(linkBps: testLinkBps ?? wireLinkBps ?? playlistLinkBps ?? 0)
         stateLock.unlock()
         let ladder = offered && !copyOnly
+        // Rungs ride the server's audio under the same names, which the Atmos activator cannot tell apart.
+        awaitSpatialVerdict(declining: audioLoActive && ladder ? "the ladder's rungs carry server audio" : nil)
         var out = "#EXTM3U\n#EXT-X-VERSION:\(ladder ? 10 : 7)\n"
 
         // Audio renditions. Every track points at its own audio-only playlist
@@ -246,10 +251,15 @@ extension RemuxSession {
         let tracks = liveAudioTracks ?? config.audioTracks
         let subtitles = liveSubtitles ?? config.subtitles
         let audioChannels = resolvedAudioChannels
+        let spatialAudio = spatialSplit
         stateLock.unlock()
         // Same predicate as the pipeline's splitAudio, or the master names a rendition never built.
-        let useAudioGroup = tracks.count > 1 || !config.tiers.isEmpty || tracks.contains(where: { $0.usesServerAudio })
+        let useAudioGroup = tracks.count > 1 || !config.tiers.isEmpty || tracks.contains(where: { $0.usesServerAudio }) || spatialAudio
         let audioNames = Self.renditionNames(tracks.map { (name: $0.name, index: $0.index) })
+        stateLock.lock()
+        let announced = spatialAnnounced
+        stateLock.unlock()
+        SpatialAudioOutput.name(Set(tracks.indices.filter { announced.contains(audioPrefix($0)) }.map { audioNames[$0] }), session: self)
         let subtitleNames = Self.renditionNames(subtitles.map { (name: $0.name, index: $0.index) })
         let useServerAudioGroup = audioLoActive && ladder
         if useAudioGroup {
@@ -339,7 +349,8 @@ extension RemuxSession {
             out += line
         }
 
-        let audioBandwidth = originalAudioBandwidth(tracks)
+        // An APAC rendition carries at least its own rate, whatever the source track declares.
+        let audioBandwidth = max(originalAudioBandwidth(tracks), announced.isEmpty ? 0 : SpatialAudio.bitRate)
         let bandwidth = config.primaryVideoBandwidth > 0 ? config.primaryVideoBandwidth + audioBandwidth : (config.bandwidth > 0 ? config.bandwidth : 20_000_000)
         let peaks = originalPeakBandwidths(tracks, splitAudio: useAudioGroup, fallback: bandwidth)
         let videoCodecs = originalVideoCodecs()
@@ -577,6 +588,7 @@ extension RemuxSession {
     func mediaPlaylist(prefix: String = "") -> String {
         if config.isLive { return livePlaylist(prefix: prefix) }
         awaitGrid()
+        if !prefix.isEmpty, let spatial = spatialRendition(prefix) { return spatialPlaylist(spatial) }
         let initName = prefix.isEmpty ? "init.mp4" : "\(prefix)-init.mp4"
         var out = "#EXTM3U\n#EXT-X-VERSION:7\n" + startTag
         // Covers the final segment, which absorbs the duration remainder and
