@@ -3352,6 +3352,29 @@ describe("useVideoPlayback (mounted)", () => {
         });
         expect(ref.current!.get().paused).toBe(true);
       });
+
+      it("hands the restarted stream its own errors while an audio server wait is pending", async () => {
+        const { ref } = await mount({ videoId: "video-1" });
+        await playToStable(ref);
+        const tracks = (selected: number) => ({ audioTracks: [0, 1].map((index) => ({ index, selected: index === selected })) }) as never;
+        await act(async () => {
+          callbacks(ref).onAudioTracks(tracks(0));
+        });
+        await act(async () => {
+          callbacks(ref).onError({ error: EXPIRED_AUDIO_SESSION } as never);
+        });
+        const before = mockTranscodeUrl.mock.calls.length;
+        await act(async () => {
+          callbacks(ref).onAudioTracks(tracks(1));
+          jest.advanceTimersByTime(1);
+          for (let hop = 0; hop < 30; hop++) await Promise.resolve();
+        });
+        expect(mockTranscodeUrl.mock.calls.length).toBe(before + 1);
+        await act(async () => {
+          callbacks(ref).onError({ error: EXPIRED_AUDIO_SESSION } as never);
+        });
+        expect(mockProbeEmit).toHaveBeenCalledWith("audioReset", expect.objectContaining({ lane: "transcode", reopens: 2 }));
+      });
     });
 
     describe("on the play/pause toggle", () => {

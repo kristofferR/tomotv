@@ -1670,6 +1670,9 @@ export function useVideoPlayback(config: VideoPlaybackConfig): VideoPlaybackResu
         setPlaybackStage(preparedTransport === "server" ? "server" : preparedTransport === "direct" ? "reading" : "player");
         // A new stream remounts the player, which starts paused; a live reload keeps the one player.
         if (!isLiveRef.current) playerPlayingRef.current = false;
+        // A wait on the audio server belongs to the stream this one replaces: its errors are this stream's own.
+        if (audioResetRef.current.timer) clearTimeout(audioResetRef.current.timer);
+        audioResetRef.current.timer = null;
         streamGenerationRef.current += 1;
         streamUrlRef.current = url;
         setStreamUrl(url);
