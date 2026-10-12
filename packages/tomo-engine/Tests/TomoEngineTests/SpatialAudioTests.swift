@@ -385,7 +385,26 @@ final class SpatialAudioTests: XCTestCase {
         XCTAssertTrue(session.masterPlaylist().contains("apac.31.03"))
         let spatial = try XCTUnwrap(session.spatialRendition("a0"))
         XCTAssertTrue(spin(seconds: 30) { spatial.has(2) }, "no segment after the jump")
+        XCTAssertTrue(spatial.has(0) && spatial.has(1), "the segment the jump interrupted is missing")
         XCTAssertNil(spatial.failure)
+        XCTAssertFalse(session.hasFailed)
+    }
+
+    /// Timestamps that jump in the last packets leave no packet to open a new session on: the track
+    /// goes back to FLAC rather than leave its last segment unmade.
+    func testATimestampJumpAtTheEndFallsBack() throws {
+        guard let path = ProcessInfo.processInfo.environment["TOMO_SPATIAL_SOURCE"] else { throw XCTSkip("set TOMO_SPATIAL_SOURCE") }
+        let source = try ffmpeg(["-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25:duration=4", "-t", "4", "-i", path,
+                                 "-map", "0:v", "-map", "1:a:0", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "25", "-c:a", "copy",
+                                 "-bsf:a", "setts=pts='if(gte(PTS*TB,3.9),PTS+2/TB,PTS)':dts='if(gte(DTS*TB,3.9),DTS+2/TB,DTS)'"],
+                                output: try derived(from: path, "end-gap"))
+        let session = try session(for: source.path)
+        defer { session.stop() }
+        XCTAssertTrue(spin(seconds: 30) { session.stateLock.withLock { session.reachedEnd } })
+        XCTAssertTrue(spin(seconds: 30) {
+            guard let spatial = session.spatialRendition("a0") else { return session.rendition(withPrefix: "a0")?.transcoder != nil }
+            return (0..<spatial.segmentCount).allSatisfy(spatial.has)
+        }, "the last segment is neither made nor handed to the transcoder")
         XCTAssertFalse(session.hasFailed)
     }
 

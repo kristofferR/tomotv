@@ -53,10 +53,14 @@ final class SpatialAudio {
     private var refusal: String?
     private var remembers = false
     private var jumped = false
+    /// The input ended: no packet follows to open a new session on.
+    private var finishing = false
 
     // Pipeline thread only.
     private var session: AnyObject?
     private var opensAtSessionStart = false
+    /// After a timestamp jump, the grid index the replaced session left unfinished.
+    private var resumeIndex: Int?
     private var inputStart = 0.0
     private var tail: Task<Void, Never>?
     private let slots = DispatchSemaphore(value: SpatialAudio.queuedChunks)
@@ -178,7 +182,9 @@ final class SpatialAudio {
             first = nil
             highest = -1
             jumped = false
+            finishing = false
         }
+        resumeIndex = nil
         cancelSession()
     }
 
@@ -191,10 +197,10 @@ final class SpatialAudio {
     /// One packet of the selected track, its time already on the output timeline.
     func feed(_ pkt: UnsafeMutablePointer<AVPacket>, timeBase: AVRational) {
         guard let data = pkt.pointee.data, pkt.pointee.size > 0 else { return }
-        if lock.withLock({ jumped }) {
-            NSLog("[LocalRemuxer] spatial %@: the timestamps jumped, a new session takes over", prefix)
+        if let resume = lock.withLock({ jumped ? max(first ?? 0, highest + 1) : nil }) {
+            NSLog("[LocalRemuxer] spatial %@: the timestamps jumped, a new session takes over at seg%d", prefix, resume)
             reset()
-            opensAtSessionStart = false
+            resumeIndex = resume
         }
         let bytes = Data(bytes: data, count: Int(pkt.pointee.size))
         let time = pkt.pointee.pts == SWIFT_AV_NOPTS_VALUE ? nil : Double(pkt.pointee.pts) * av_q2d(timeBase)
@@ -216,6 +222,13 @@ final class SpatialAudio {
     /// The input ended: the session pads to the playlist's end and delivers its last segments.
     func finish() {
         guard #available(macOS 26, iOS 26, tvOS 26, *), let transcoder = transcoder else { return }
+        let jumpedAtEnd = lock.withLock { () -> Bool in
+            finishing = true
+            guard jumped, refusal == nil else { return false }
+            refusal = "the timestamps jumped at the end of the input"
+            return true
+        }
+        if jumpedAtEnd { NSLog("[LocalRemuxer] spatial %@ refused: the timestamps jumped at the end of the input", prefix) }
         send()
         let end = CMTime(value: totalFrames, timescale: CMTimeScale(Self.sampleRate))
         enqueue { _ = try await transcoder.finish(paddingTo: end) }
@@ -253,11 +266,12 @@ final class SpatialAudio {
     }
 
     /// Opens a session at a sync packet. Its first segment is the first grid index whose audio, after
-    /// the encoder's priming, the packet reaches.
+    /// the encoder's priming, the packet reaches, or after a jump the one left unfinished, padded to the packet.
     private func begin(at time: Double) {
         guard #available(macOS 26, iOS 26, tvOS 26, *) else { return }
         let frames = Int64((time * Self.sampleRate).rounded())
-        let index = opensAtSessionStart ? 0 : max(0, Int((Double(frames - priming) / Double(Self.segmentFrames)).rounded(.up)))
+        let index = resumeIndex ?? (opensAtSessionStart ? 0 : max(0, Int((Double(frames - priming) / Double(Self.segmentFrames)).rounded(.up))))
+        resumeIndex = nil
         var configuration = APACConfiguration(startTime: CMTime(value: Int64(index) * Self.segmentFrames + priming, timescale: 48_000),
                                               liveEncoding: true)
         configuration.inputStartTime = CMTime(value: frames, timescale: 48_000)
@@ -315,13 +329,13 @@ final class SpatialAudio {
         let disposition = Self.disposition(of: error)
         let first = lock.withLock { () -> Bool in
             guard self.generation == generation, refusal == nil, !jumped else { return false }
-            if disposition == .newSession {
+            if disposition == .newSession, !finishing {
                 jumped = true
-            } else {
-                refusal = String(describing: error)
-                remembers = disposition == .remember
+                return false
             }
-            return disposition != .newSession
+            refusal = String(describing: error)
+            remembers = disposition == .remember
+            return true
         }
         if first { NSLog("[LocalRemuxer] spatial %@ refused: %@", prefix, String(describing: error)) }
     }

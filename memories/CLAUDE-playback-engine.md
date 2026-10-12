@@ -262,6 +262,7 @@ the session to take a second of audio: a refusal before that rebuilds the rendit
 it the session fails with `spatialAudio` and the app reopens the engine at the playhead. The
 process remembers content refusals (`.decoding`, `.invalidConfiguration`) and a conversion slower
 than realtime, which goes back to FLAC before any engine verdict; a timestamp jump starts a new
+session at the segment it interrupted, and one in the last packets costs the track for that
 session. `SpatialAudioOutput` attaches the library's `AtmosOutputActivator` to react-native-video's
 player through its plugin API on tvOS; on iOS, AirPlay sends the track back to FLAC.
 
