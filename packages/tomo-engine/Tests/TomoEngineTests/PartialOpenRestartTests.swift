@@ -13,8 +13,11 @@ final class PartialOpenRestartTests: XCTestCase {
     private static let fixture = makeFixture(named: "gop5s-60s.ts", gopFrames: 120)
     /// The Daily Dweebs recording's shape: keyframes every 2.08s, never on the 6s grid.
     private static let unalignedFixture = makeFixture(named: "gop2s-60s.ts", gopFrames: 50)
+    /// Keyframes on the 6s grid, in Matroska, three minutes: segment 1 leaves the keep window around 28.
+    private static let matroskaSeconds = 180.0
+    private static let matroskaFixture = makeFixture(named: "gop2s-180s.mkv", gopFrames: 48, format: "matroska", seconds: matroskaSeconds)
 
-    private static func makeFixture(named name: String, gopFrames: Int) -> URL? {
+    private static func makeFixture(named name: String, gopFrames: Int, format: String = "mpegts", seconds: Double = PartialOpenRestartTests.seconds) -> URL? {
         let dir = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent(".build/codec-fixtures", isDirectory: true)
@@ -27,7 +30,7 @@ final class PartialOpenRestartTests: XCTestCase {
             "-hide_banner", "-loglevel", "error", "-y",
             "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24", "-t", String(seconds),
             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-            "-g", String(gopFrames), "-keyint_min", String(gopFrames), "-sc_threshold", "0", "-an", "-f", "mpegts", out.path,
+            "-g", String(gopFrames), "-keyint_min", String(gopFrames), "-sc_threshold", "0", "-an", "-f", format, out.path,
         ]
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
@@ -64,6 +67,25 @@ final class PartialOpenRestartTests: XCTestCase {
         let restarts = session.seekRestarts
         session.stateLock.unlock()
         XCTAssertEqual(restarts, 1, "the seek starts a segment early, so the requested one opens whole")
+    }
+
+    /// A seek back whose new connection times out reads on from the old one while FFmpeg's Matroska
+    /// seek reports success: the restart seeks again, on every visit, instead of failing the session.
+    func testASeekBackWhoseConnectionTimesOutSeeksAgain() throws {
+        guard FileManager.default.isExecutableFile(atPath: Self.ffmpeg) else { throw XCTSkip("no ffmpeg at \(Self.ffmpeg)") }
+        let bytes = try Data(contentsOf: try XCTUnwrap(Self.matroskaFixture, "libx264 produced no fixture"))
+        let server = try ThrottledFileServer(data: bytes, bytesPerSecond: bytes.count / 4)
+        defer { server.stop() }
+        let session = try RemuxSession(config: makeConfig(durationSeconds: Self.matroskaSeconds, inputUrl: "http://127.0.0.1:\(server.port)/gop.mkv",
+                                                          codecs: "avc1.64000D", width: 320, height: 180, frameRate: 24))
+        session.start()
+        defer { session.stop() }
+        for visit in 1...3 {
+            XCTAssertNotNil(session.segmentURL(28), "visit \(visit)")
+            server.stallNextRequest()
+            XCTAssertNotNil(session.segmentURL(1), "the restart for segment 1 failed the session on visit \(visit)")
+        }
+        XCTAssertFalse(session.hasFailed)
     }
 
     func testTheRestartSeeksEarlierPerLateOpeningAndStopsWithholdingAtTheCap() {

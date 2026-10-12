@@ -36,6 +36,7 @@ All notable changes to Tomo TV are documented here.
 
 ### Fixed
 
+- A Matroska file on a server slow to answer no longer stops playing when a seek back times out: the engine seeks again
 - On Apple TV with automatic subtitles on, the subtitle track the system marks On loads
 - A download the server converts played without its saved subtitles (since 2.2.2)
 - Pausing a download the server converts restarted it from zero: Jellyfin streams a conversion with no ranges to resume from, so its row has no pause
