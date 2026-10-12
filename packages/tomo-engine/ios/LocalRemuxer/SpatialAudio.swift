@@ -342,20 +342,30 @@ final class SpatialAudio {
         if first { NSLog("[LocalRemuxer] spatial %@ refused: %@", prefix, String(describing: error)) }
     }
 
+    /// A file the cache will not take leaves its request nothing to serve: the track goes back to FLAC for the session.
+    private func refuseWrite(_ name: String, _ error: Error) {
+        let reason = "could not write \(name): \(error.localizedDescription)"
+        NSLog("[LocalRemuxer] spatial %@ refused: %@", prefix, reason)
+        decline(reason)
+    }
+
     @available(macOS 26, iOS 26, tvOS 26, *)
     private func deliver(_ segment: APACSegment, generation: Int) {
         switch segment.kind {
         case .initialization:
             // Every session writes the same initialization apart from its creation time.
-            guard lock.withLock({ self.generation == generation && !initWritten }),
-                  (try? segment.data.write(to: dir.appendingPathComponent(initName), options: .atomic)) != nil else { return }
+            guard lock.withLock({ self.generation == generation && !initWritten }) else { return }
+            do { try segment.data.write(to: dir.appendingPathComponent(initName), options: .atomic) } catch { return refuseWrite(initName, error) }
             lock.withLock { initWritten = true }
         case .media:
             guard let start = segment.startTime else { return }
             let index = Int((start.seconds * Self.sampleRate / Double(Self.segmentFrames)).rounded())
-            guard lock.withLock({ self.generation == generation && first.map { index >= $0 } == true }),
-                  (try? RemuxSession.writeSegment(segment.data, lead: RemuxSession.stypBox, to: dir.appendingPathComponent(segmentName(index)))) != nil
-            else { return }
+            guard lock.withLock({ self.generation == generation && first.map { index >= $0 } == true }) else { return }
+            do {
+                try RemuxSession.writeSegment(segment.data, lead: RemuxSession.stypBox, to: dir.appendingPathComponent(segmentName(index)))
+            } catch {
+                return refuseWrite(segmentName(index), error)
+            }
             lock.withLock {
                 guard self.generation == generation else { return }
                 completed.insert(index)

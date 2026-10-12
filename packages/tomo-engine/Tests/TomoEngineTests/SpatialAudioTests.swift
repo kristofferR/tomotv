@@ -427,20 +427,40 @@ final class SpatialAudioTests: XCTestCase {
         }
     }
 
-    /// A new session after the input ended does not wait behind the silence the last one still pads.
-    func testANewSessionDoesNotWaitBehindTheLastOnesPadding() throws {
-        guard #available(macOS 26, *) else { throw XCTSkip("SpatialAudioBridge needs macOS 26") }
+    /// A converter writing to `dir`, and four seconds of the source's first audio track alone to feed it.
+    @available(macOS 26, *)
+    private func fourSecondConverter(totalFrames: Int64, dir: URL) throws -> (SpatialAudio, String) {
         guard let path = ProcessInfo.processInfo.environment["TOMO_SPATIAL_SOURCE"] else { throw XCTSkip("set TOMO_SPATIAL_SOURCE") }
         let source = try ffmpeg(["-i", path, "-map", "0:a:0", "-c", "copy", "-t", "4"], output: try derived(from: path, "audio-4s")).path
         var ctx: UnsafeMutablePointer<AVFormatContext>?
         guard avformat_open_input(&ctx, source, nil, nil) >= 0, let input = ctx else { throw XCTSkip("cannot open \(source)") }
         let trueHD = try XCTUnwrap(input.pointee.streams[0]).pointee.codecpar.pointee.codec_id == AV_CODEC_ID_TRUEHD
         avformat_close_input(&ctx)
+        let spatial = SpatialAudio(prefix: "a0", streamIndex: 0, trueHD: trueHD, priming: try APACConfiguration().encoderPrimingDuration().value,
+                                   totalFrames: totalFrames, dir: dir, refusalKey: "test#0")
+        return (spatial, source)
+    }
+
+    /// A segment the cache will not take sends the track back to FLAC instead of leaving its request waiting.
+    func testASegmentTheCacheWillNotTakeFallsBack() throws {
+        guard #available(macOS 26, *) else { throw XCTSkip("SpatialAudioBridge needs macOS 26") }
+        let missing = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let (spatial, source) = try fourSecondConverter(totalFrames: 8 * 48_000, dir: missing)
+        defer { spatial.stop() }
+        spatial.open(atSessionStart: true)
+        try feed(spatial, from: source)
+        spatial.finish()
+        XCTAssertTrue(spin(seconds: 30) { spatial.failure != nil }, "the track stayed APAC with nothing written")
+        XCTAssertFalse(spatial.has(0))
+    }
+
+    /// A new session after the input ended does not wait behind the silence the last one still pads.
+    func testANewSessionDoesNotWaitBehindTheLastOnesPadding() throws {
+        guard #available(macOS 26, *) else { throw XCTSkip("SpatialAudioBridge needs macOS 26") }
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let spatial = SpatialAudio(prefix: "a0", streamIndex: 0, trueHD: trueHD, priming: try APACConfiguration().encoderPrimingDuration().value,
-                                   totalFrames: 20 * 60 * 48_000, dir: dir, refusalKey: "test#0")
+        let (spatial, source) = try fourSecondConverter(totalFrames: 20 * 60 * 48_000, dir: dir)
         defer { spatial.stop() }
         spatial.open(atSessionStart: true)
         try feed(spatial, from: source)
