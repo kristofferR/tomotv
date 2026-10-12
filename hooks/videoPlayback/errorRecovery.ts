@@ -60,7 +60,15 @@ export interface ErrorRecoveryInput {
   serverTranscodingAllowed?: boolean;
   /** The engine already took its one fresh session for this item. */
   hasRetriedGateway?: boolean;
+  /** The system audio server restarted under the player (isAudioSessionExpired). */
+  audioSessionExpired?: boolean;
+  /** Reopens this item already spent waiting out an audio server restart. */
+  audioResetReopens?: number;
 }
+
+/** An audio server restart expires the session for about 3 s (measured on Apple TV): wait, then reopen, at most this often. */
+export const AUDIO_RESET_WAIT_MS = 2000;
+export const AUDIO_RESET_REOPENS = 3;
 
 /** Failures of the link, which a later attempt can outlast. */
 const LINK_FAILURES: readonly PlaybackErrorType[] = [PlaybackErrorType.STALLED, PlaybackErrorType.NETWORK, PlaybackErrorType.TIMEOUT];
@@ -86,7 +94,7 @@ export interface ErrorRecoveryDecision {
   dropSubtitles: boolean;
   /** The server fallback owes the viewer playback, not fidelity: enter at the floor preset. */
   stallFallback: boolean;
-  action: { kind: "refreshCredentials" } | { kind: "restartRemux" } | { kind: "transcodeSeekRecovery" } | { kind: "reportError" };
+  action: { kind: "refreshCredentials" } | { kind: "restartRemux" } | { kind: "transcodeSeekRecovery" } | { kind: "reopenAfterAudioReset" } | { kind: "reportError" };
 }
 
 /**
@@ -95,6 +103,20 @@ export interface ErrorRecoveryDecision {
  */
 export function planErrorRecovery(input: ErrorRecoveryInput): ErrorRecoveryDecision {
   const midPlayback = input.currentTimeSec > 1;
+  // The stream is fine and so is the lane: spending a rung on it would land on the server's ladder.
+  if (input.audioSessionExpired && (input.audioResetReopens ?? 0) < AUDIO_RESET_REOPENS) {
+    return {
+      retryGateway: false,
+      engineSpent: false,
+      latchTranscodeUpFront: false,
+      willRetryWithTranscode: true,
+      carryPositionSec: midPlayback ? input.currentTimeSec : null,
+      stopRemuxSession: input.mode === "localRemux",
+      dropSubtitles: false,
+      stallFallback: false,
+      action: { kind: "reopenAfterAudioReset" },
+    };
+  }
   const engineSpent = input.networkGateway === true && !input.hasTriedTranscoding && engineSpentWithoutServer(input);
   const retryGateway = input.networkGateway === true && !input.hasTriedTranscoding && !engineSpent && (input.serverTranscodingAllowed === false || LINK_FAILURES.includes(input.errorType));
   const restartRemux = input.mode === "localRemux" && input.errorType === PlaybackErrorType.STALLED && midPlayback && !input.hasTriedRemuxRestart;
