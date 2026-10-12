@@ -88,7 +88,7 @@ import {
 } from "@/services/subtitlePreference";
 import { audioLanguageToStore, getAudioPreferenceSync, preferredAudioStreamIndex, readAudioPreference, saveAudioPreference } from "@/services/audioPreference";
 import { refreshTrackSettings } from "@/services/jellyfin/trackSettings";
-import { PlaybackErrorType, classifyPlaybackError, getPlaybackErrorMessage } from "@/utils/errorClassification";
+import { PlaybackErrorType, classifyPlaybackError, getPlaybackErrorMessage, isAudioSessionExpired } from "@/utils/errorClassification";
 import { t } from "@/services/i18n";
 import { errorIdOf, formatErrorRef, IdentifiedError, nativeErrorOf, PLAYBACK_ERROR_IDS, type LaneTag, type PlaybackErrorId } from "@/utils/errorIds";
 import { IS_MAC } from "@/utils/hostEnvironment";
@@ -98,6 +98,7 @@ import { QUALITY_PRESETS, type QualityPreset } from "@/services/jellyfin/constan
 import { getQualitySettings } from "@/services/jellyfin/session";
 import { videoPlayerReducer, type PlaybackMode, type PlaybackTransport, type VideoPlayerState } from "./videoPlayback/machine";
 import {
+  AUDIO_RESET_WAIT_MS,
   automaticRetryDelay,
   engineSpentWithoutServer,
   planErrorRecovery,
@@ -356,6 +357,8 @@ export function useVideoPlayback(config: VideoPlaybackConfig): VideoPlaybackResu
   // One engine restart per item for a mid-playback starvation (see planErrorRecovery).
   // Refs, not state: nothing renders on them, and onError reads them synchronously.
   const hasTriedRemuxRestartRef = useRef(false);
+  // Reopens spent on audio server restarts this item, and the one waiting out the current restart.
+  const audioResetRef = useRef<{ reopens: number; timer: ReturnType<typeof setTimeout> | null }>({ reopens: 0, timer: null });
   // The engine's own segment clock for this session (Remuxer.reportThroughput): the last
   // few samples, the subscription that feeds them, and whether they already moved playback.
   const throughputRef = useRef<ThroughputWatch>({ samples: [], unsubscribe: null, handedOver: false });
@@ -2273,6 +2276,8 @@ export function useVideoPlayback(config: VideoPlaybackConfig): VideoPlaybackResu
       }
 
       const attempt = requestIdRef.current;
+      // A reopen is already waiting out the audio server's restart: the dead player's later errors are that restart.
+      if (audioResetRef.current.timer) return;
       if (currentTimeRef.current > 0) seekToPositionAfterLoadRef.current = currentTimeRef.current;
       // The whole ladder decision is pure (see planErrorRecovery); this callback only applies it.
       const decision = planErrorRecovery({
@@ -2288,6 +2293,8 @@ export function useVideoPlayback(config: VideoPlaybackConfig): VideoPlaybackResu
         networkGateway: transportRef.current === "gateway" && !playsFromDisk(videoId),
         serverTranscodingAllowed: !videoDetails || serverTranscodeAllowed(videoDetails),
         hasRetriedGateway: gatewayRetriedRef.current,
+        audioSessionExpired: isAudioSessionExpired(error.error),
+        audioResetReopens: audioResetRef.current.reopens,
       });
       const { willRetryWithTranscode } = decision;
 
@@ -2330,6 +2337,22 @@ export function useVideoPlayback(config: VideoPlaybackConfig): VideoPlaybackResu
         willRetryWithTranscode,
         hasTriedCredentialRefresh,
       });
+
+      // Every player made before the audio server is back fails at creation; the same lane reopens after it.
+      if (decision.action.kind === "reopenAfterAudioReset") {
+        audioResetRef.current.reopens += 1;
+        logger.warn("The system audio server restarted, reopening the same lane at the playhead", {
+          service: "useVideoPlayback",
+          position: decision.carryPositionSec,
+          reopen: audioResetRef.current.reopens,
+        });
+        probeEmit("engineRestart", { position: decision.carryPositionSec, reason: "audio server restarted" });
+        audioResetRef.current.timer = setTimeout(() => {
+          audioResetRef.current.timer = null;
+          if (isMountedRef.current && requestIdRef.current === attempt) restartAtPlayhead();
+        }, AUDIO_RESET_WAIT_MS);
+        return;
+      }
 
       // One engine restart for a mid-playback starvation: the file was playing fine,
       // the feed stalled, a fresh session at the playhead beats a server transcode.
@@ -2839,6 +2862,7 @@ export function useVideoPlayback(config: VideoPlaybackConfig): VideoPlaybackResu
       requestIdRef.current += 1;
       if (gatewayRecoveryRef.current) clearTimeout(gatewayRecoveryRef.current.timer);
       gatewayRecoveryRef.current = null;
+      if (audioResetRef.current.timer) clearTimeout(audioResetRef.current.timer);
 
       // Clear timers
       if (autoPlayTimerRef.current) {
@@ -2984,6 +3008,8 @@ export function useVideoPlayback(config: VideoPlaybackConfig): VideoPlaybackResu
     setHasTriedCredentialRefresh(false);
     setHasTriedSeekRecovery(false);
     hasTriedRemuxRestartRef.current = false;
+    if (audioResetRef.current.timer) clearTimeout(audioResetRef.current.timer);
+    audioResetRef.current = { reopens: 0, timer: null };
     copyRebuiltRef.current = false;
     liveStarvedLoggedRef.current = false;
     liveReopenedRef.current = false;
@@ -3332,6 +3358,8 @@ export function useVideoPlayback(config: VideoPlaybackConfig): VideoPlaybackResu
     setHasTriedTranscoding(false);
     setHasTriedSeekRecovery(false);
     hasTriedRemuxRestartRef.current = false;
+    if (audioResetRef.current.timer) clearTimeout(audioResetRef.current.timer);
+    audioResetRef.current = { reopens: 0, timer: null };
     copyRebuiltRef.current = false;
     liveStarvedLoggedRef.current = false;
     liveReopenedRef.current = false;
