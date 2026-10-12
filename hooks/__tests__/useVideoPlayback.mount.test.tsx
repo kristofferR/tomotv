@@ -10,7 +10,7 @@ import React, { forwardRef, useImperativeHandle } from "react";
 import TestRenderer, { act } from "react-test-renderer";
 import { useVideoPlayback, type VideoPlaybackConfig, type VideoPlaybackResult } from "@/hooks/useVideoPlayback";
 import { DIRECT_STALL_DEADLINE_MS, ENGINE_SEGMENT_DEADLINE_MS, LIVE_STALL_DEADLINE_MS, SUBTITLE_CAPTURE_SETTLE_MS, VOD_OPEN_DEADLINE_MS } from "@/hooks/videoPlayback/constants";
-import { AUTOMATIC_RETRY_BUDGET_MS } from "@/hooks/videoPlayback/errorRecovery";
+import { AUDIO_RESET_WAIT_MS, AUTOMATIC_RETRY_BUDGET_MS } from "@/hooks/videoPlayback/errorRecovery";
 import type { JellyfinVideoItem } from "@/types/jellyfin";
 import {
   closeLiveStream,
@@ -251,6 +251,14 @@ function videoItem(overrides: Partial<JellyfinVideoItem> = {}): JellyfinVideoIte
     ...overrides,
   } as JellyfinVideoItem;
 }
+
+/** What react-native-video delivered on an Apple TV whose audio server the system had just killed. */
+const EXPIRED_AUDIO_SESSION = {
+  code: -11800,
+  domain: "AVFoundationErrorDomain",
+  localizedDescription: "The operation could not be completed",
+  localizedFailureReason: "An unknown error occurred (-19221)",
+};
 
 type HookRef = { get: () => VideoPlaybackResult };
 
@@ -668,6 +676,40 @@ describe("useVideoPlayback (mounted)", () => {
           serverOff: { by: "account", needed: false },
           ref: { id: "PB-AVPLAYER", lane: "ENG", native: { domain: "AVFoundationErrorDomain", code: -11800 } },
         });
+        expect(mockTranscodeUrl).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => renderer?.unmount());
+        jest.useRealTimers();
+      }
+    });
+
+    it.each([
+      ["while playing", 42, { position: 42 }],
+      ["before the first frame", 0, {}],
+    ])("waits out an audio server restart %s and reopens the engine at the playhead", async (_when, playhead, position) => {
+      jest.useFakeTimers({ doNotFake: ["queueMicrotask"] });
+      let renderer: TestRenderer.ReactTestRenderer | undefined;
+      try {
+        mockCanRemux.mockResolvedValue(true);
+        (isLocalRemuxAvailable as jest.Mock).mockReturnValue(true);
+        const mounted = await mount({ videoId: "video-1" });
+        const { ref } = mounted;
+        renderer = mounted.renderer;
+        ref.current!.get().currentTimeRef.current = playhead;
+        await act(async () => {
+          ref.current!.get().videoCallbacks.onError({ error: EXPIRED_AUDIO_SESSION } as never);
+        });
+        expect(mockProbeEmit).toHaveBeenCalledWith("audioReset", { lane: "localRemux", reopens: 1, ...position });
+        expect(mockProbeEmit).not.toHaveBeenCalledWith("engineRestart", expect.anything());
+
+        await act(async () => jest.advanceTimersByTime(AUDIO_RESET_WAIT_MS));
+        await act(async () => {
+          jest.advanceTimersByTime(1);
+          for (let hop = 0; hop < 30; hop++) await Promise.resolve();
+        });
+        expect(mockStartLocalRemux).toHaveBeenCalledTimes(2);
+        expect(mockStartLocalRemux.mock.calls[1][2]).toBe(playhead || undefined);
+        expect(ref.current!.get().state).toMatchObject({ mode: "localRemux" });
         expect(mockTranscodeUrl).not.toHaveBeenCalled();
       } finally {
         await act(async () => renderer?.unmount());
@@ -1667,6 +1709,34 @@ describe("useVideoPlayback (mounted)", () => {
         });
         expect(ref.current!.get().state).toMatchObject({ type: "ERROR", error: "Playback stalled while waiting for the server", canRetryWithTranscode: true });
         expect(mockStopLocalRemux).toHaveBeenCalledWith("token:http://127.0.0.1:9999/s/abc/master.m3u8");
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it("waits out an audio server restart on the engine and keeps the fresh open for a real drop", async () => {
+      jest.useFakeTimers({ doNotFake: ["queueMicrotask"] });
+      try {
+        const { ref } = await mount({ videoId: "video-1" });
+        const fail = async (failure: object, wait: number) => {
+          await act(async () => {
+            ref.current!.get().videoCallbacks.onError({ error: failure } as never);
+          });
+          await act(async () => jest.advanceTimersByTime(wait));
+          await act(async () => {
+            jest.advanceTimersByTime(500);
+            for (let hop = 0; hop < 30; hop++) await Promise.resolve();
+          });
+        };
+
+        await fail(EXPIRED_AUDIO_SESSION, AUDIO_RESET_WAIT_MS);
+        expect(mockProbeEmit).toHaveBeenCalledWith("audioReset", { lane: "localRemux", reopens: 1 });
+        expect(mockStartLocalRemux).toHaveBeenCalledTimes(2);
+        expect(ref.current!.get().sourceUri).toBe("http://127.0.0.1:9999/s/abc/master.m3u8");
+
+        await fail({ errorString: "dropped", code: -12885 }, 1);
+        expect(mockStartLocalRemux).toHaveBeenCalledTimes(3);
+        expect(ref.current!.get().sourceUri).toBe("http://127.0.0.1:9999/s/abc/master.m3u8");
       } finally {
         jest.useRealTimers();
       }

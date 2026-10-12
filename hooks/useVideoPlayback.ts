@@ -2144,19 +2144,34 @@ export function useVideoPlayback(config: VideoPlaybackConfig): VideoPlaybackResu
       // Extract error message from react-native-video error object
       const originalMessage = error.error?.localizedDescription || error.error?.errorString || String(error.error || "");
       const errorType = classifyPlaybackError(error.error);
+      // A reopen is already waiting out the audio server's restart: the dead player's later errors are that restart.
+      if (audioResetRef.current.timer) return;
+      const audioSessionExpired = isAudioSessionExpired(error.error);
+      // Every player made before the audio server is back fails at creation; the same lane reopens after it.
+      const waitOutAudioServer = (reopenLane: () => void, position: number | null) => {
+        const reopens = ++audioResetRef.current.reopens;
+        logger.warn("The system audio server restarted, reopening the same lane once it is back", { service: "useVideoPlayback", lane: currentMode, position, reopens });
+        probeEmit("audioReset", { lane: currentMode, reopens, ...(position != null ? { position: Math.round(position) } : {}) });
+        audioResetRef.current.timer = setTimeout(() => {
+          audioResetRef.current.timer = null;
+          reopenLane();
+        }, AUDIO_RESET_WAIT_MS);
+      };
 
       if (isLiveRef.current) {
-        const { reopen, toServer, retry } = planLiveErrorRecovery({
+        const { reopen, toServer, retry, waitForAudio } = planLiveErrorRecovery({
           mode: currentMode,
           errorType,
           hasReopened: liveReopenedRef.current,
           lane: liveLaneRef.current,
           serverTranscodingAllowed: !videoDetails || serverTranscodeAllowed(videoDetails),
+          audioSessionExpired,
+          audioResetReopens: audioResetRef.current.reopens,
         });
         if (reopen) liveReopenedRef.current = true;
         if (toServer) liveLaneRef.current = "server";
         if (retry) setPlaybackStage("reopening");
-        logger.error("Live playback error", error, { service: "useVideoPlayback", lane: currentMode, next: reopen ? "reopen" : toServer ? "server" : "error" });
+        logger.error("Live playback error", error, { service: "useVideoPlayback", lane: currentMode, next: waitForAudio ? "same lane" : reopen ? "reopen" : toServer ? "server" : "error" });
         probeEmit("error", { mode: currentMode, message: originalMessage, willRetry: retry });
         stopLocalRemux(localRemuxTokenRef.current);
         localRemuxTokenRef.current = null;
@@ -2179,18 +2194,18 @@ export function useVideoPlayback(config: VideoPlaybackConfig): VideoPlaybackResu
           }
         }
         const attempt = requestIdRef.current;
-        setImmediate(() => {
+        const report = () => {
           if (!isMountedRef.current || requestIdRef.current !== attempt) return;
           const serverOff = retry ? undefined : serverOffForError(error.error, errorType, serverTranscodeBlock(videoDetails), false);
           const ref = { id: errorIdOf(error.error, PLAYBACK_ERROR_IDS.AVPLAYER), lane: laneTagFor(transportRef.current, false), native: nativeErrorOf(error.error) };
           dispatch({ type: "PLAYER_ERROR", error: { message: getPlaybackErrorMessage(errorType), ref, ...(serverOff ? { serverOff } : {}) }, mode: currentMode, hasTriedTranscode: !retry });
-        });
+        };
+        if (waitForAudio) waitOutAudioServer(report, null);
+        else setImmediate(report);
         return;
       }
 
       const attempt = requestIdRef.current;
-      // A reopen is already waiting out the audio server's restart: the dead player's later errors are that restart.
-      if (audioResetRef.current.timer) return;
       if (currentTimeRef.current > 0) seekToPositionAfterLoadRef.current = currentTimeRef.current;
       // The whole ladder decision is pure (see planErrorRecovery); this callback only applies it.
       const decision = planErrorRecovery({
@@ -2206,7 +2221,7 @@ export function useVideoPlayback(config: VideoPlaybackConfig): VideoPlaybackResu
         networkGateway: transportRef.current === "gateway" && !playsFromDisk(videoId),
         serverTranscodingAllowed: !videoDetails || serverTranscodeAllowed(videoDetails),
         hasRetriedGateway: gatewayRetriedRef.current,
-        audioSessionExpired: isAudioSessionExpired(error.error),
+        audioSessionExpired,
         audioResetReopens: audioResetRef.current.reopens,
       });
       const { willRetryWithTranscode } = decision;
@@ -2251,19 +2266,10 @@ export function useVideoPlayback(config: VideoPlaybackConfig): VideoPlaybackResu
         hasTriedCredentialRefresh,
       });
 
-      // Every player made before the audio server is back fails at creation; the same lane reopens after it.
       if (decision.action.kind === "reopenAfterAudioReset") {
-        audioResetRef.current.reopens += 1;
-        logger.warn("The system audio server restarted, reopening the same lane at the playhead", {
-          service: "useVideoPlayback",
-          position: decision.carryPositionSec,
-          reopen: audioResetRef.current.reopens,
-        });
-        probeEmit("engineRestart", { position: decision.carryPositionSec, reason: "audio server restarted" });
-        audioResetRef.current.timer = setTimeout(() => {
-          audioResetRef.current.timer = null;
+        waitOutAudioServer(() => {
           if (isMountedRef.current && requestIdRef.current === attempt) restartAtPlayhead();
-        }, AUDIO_RESET_WAIT_MS);
+        }, decision.carryPositionSec);
         return;
       }
 
