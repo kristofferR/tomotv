@@ -24,9 +24,6 @@ public enum SpatialAudioOutput {
     /// Players whose AirPlay receiver could not reach the loopback, by follow id.
     private static var external: Set<String> = []
     @MainActor private static var followers: [String: AnyObject] = [:]
-    /// Players whose selected audio is spatial, and the session's own multichannel setting while any is.
-    @MainActor private static var spatialPlayers: Set<String> = []
-    @MainActor private static var recordedMultichannel: Bool?
 
     /// A player plays over AirPlay: no session converts until it stops.
     static var externalPlayback: Bool { lock.withLock { !external.isEmpty } }
@@ -38,11 +35,7 @@ public enum SpatialAudioOutput {
                 guard #available(macOS 26, iOS 26, tvOS 26, *) else { return }
                 #if os(tvOS)
                 let activator = AtmosOutputActivator()
-                activator.attach(to: player) { item in
-                    let spatial = playsSpatialAudio(item)
-                    multichannel(spatial, id: id)
-                    return spatial
-                }
+                activator.attach(to: player) { playsSpatialAudio($0) }
                 (followers.updateValue(activator, forKey: id) as? AtmosOutputActivator)?.detach()
                 #else
                 followers[id] = player.observe(\.isExternalPlaybackActive, options: [.initial, .new]) { player, _ in
@@ -59,7 +52,6 @@ public enum SpatialAudioOutput {
                 guard #available(macOS 26, iOS 26, tvOS 26, *) else { return }
                 #if os(tvOS)
                 (followers.removeValue(forKey: id) as? AtmosOutputActivator)?.detach()
-                multichannel(false, id: id)
                 #else
                 (followers.removeValue(forKey: id) as? NSKeyValueObservation)?.invalidate()
                 externalPlayback(false, id: id, item: nil)
@@ -77,27 +69,6 @@ public enum SpatialAudioOutput {
         }
         session?.withdrawSpatialAudio("AirPlay plays this item")
     }
-
-    #if os(tvOS)
-    /// Supports multichannel content while spatial audio plays, then restores the session's own setting.
-    @MainActor private static func multichannel(_ spatial: Bool, id: String) {
-        if spatial { spatialPlayers.insert(id) } else { spatialPlayers.remove(id) }
-        let session = AVAudioSession.sharedInstance()
-        let value: Bool
-        if !spatialPlayers.isEmpty, recordedMultichannel == nil {
-            recordedMultichannel = session.supportsMultichannelContent
-            value = true
-        } else if spatialPlayers.isEmpty, let recorded = recordedMultichannel {
-            recordedMultichannel = nil
-            value = recorded
-        } else {
-            return
-        }
-        do { try session.setSupportsMultichannelContent(value) } catch {
-            NSLog("[LocalRemuxer] multichannel content %@: %@", value ? "on" : "off", error.localizedDescription)
-        }
-    }
-    #endif
 
     static func name(_ renditions: Set<String>, session: RemuxSession) {
         lock.withLock { sessions[session.token] = renditions.isEmpty ? nil : Session(names: renditions, session: session) }
