@@ -183,12 +183,14 @@ final class SpatialAudioTests: XCTestCase {
     /// A video and a spatial seek asked in one control pass: one position takes the earlier target,
     /// two take the one nearer the newest request.
     func testAVideoAndASpatialSeekAskedTogether() {
-        XCTAssertNil(RemuxSession.combinedSeek(video: nil, spatial: nil, playhead: 0))
-        XCTAssertEqual(RemuxSession.combinedSeek(video: 50, spatial: nil, playhead: 50), 50)
-        XCTAssertEqual(RemuxSession.combinedSeek(video: nil, spatial: 49, playhead: 50), 49)
-        XCTAssertEqual(RemuxSession.combinedSeek(video: 50, spatial: 49, playhead: 50), 49)
-        XCTAssertEqual(RemuxSession.combinedSeek(video: 50, spatial: 12, playhead: 50), 50, "a scrub's leftover spatial seek")
-        XCTAssertEqual(RemuxSession.combinedSeek(video: 10, spatial: 49, playhead: 50), 49, "a scrub's leftover video seek")
+        let seek = { (video: Int?, spatial: Int?, playhead: Int) in RemuxSession.combinedSeek(video: video, spatial: spatial, playhead: playhead, window: 4) }
+        XCTAssertNil(seek(nil, nil, 0))
+        XCTAssertEqual(seek(50, nil, 50), 50)
+        XCTAssertEqual(seek(nil, 49, 50), 49)
+        XCTAssertEqual(seek(50, 49, 50), 49)
+        XCTAssertEqual(seek(50, 12, 50), 50, "a scrub's leftover spatial seek")
+        XCTAssertEqual(seek(10, 49, 50), 49, "a scrub's leftover video seek")
+        XCTAssertNil(seek(nil, 12, 50), "a leftover spatial seek after a video request served from disk")
     }
 
     /// A spatial rendition is never measured: the master counts the APAC rate for it when the source

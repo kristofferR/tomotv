@@ -268,10 +268,11 @@ extension RemuxSession {
     static let partialOpenLookback = 3
 
     /// The restart for a video and a spatial seek asked at once: the earlier target when both are for
-    /// one position, else the one nearer the newest request, which a scrub's leftover is not.
-    static func combinedSeek(video: Int?, spatial: Int?, playhead: Int) -> Int? {
+    /// one position, else the one nearer the newest request, which a scrub's leftover is not. A spatial
+    /// seek alone outside `window` of the newest request is a leftover too; its waiter re-asserts it if not.
+    static func combinedSeek(video: Int?, spatial: Int?, playhead: Int, window: Int) -> Int? {
         guard let spatial else { return video }
-        guard let video else { return spatial }
+        guard let video else { return abs(spatial - playhead) <= window ? spatial : nil }
         if abs(video - spatial) <= seekAheadSegments { return min(video, spatial) }
         return abs(video - playhead) <= abs(spatial - playhead) ? video : spatial
     }
@@ -2144,7 +2145,7 @@ extension RemuxSession {
                 lateOpenRestart = nil
                 // Its waiter found the running session will not reach that spatial segment.
                 if sessionAnchorUs != nil, let spatial = pendingSpatialSeek {
-                    seekTo = Self.combinedSeek(video: seekTo, spatial: spatial, playhead: lastRequestedSegment)
+                    seekTo = Self.combinedSeek(video: seekTo, spatial: spatial, playhead: lastRequestedSegment, window: aheadWindow)
                     pendingSpatialSeek = nil
                 }
                 // Never sleep while a request waits on a segment inside the
