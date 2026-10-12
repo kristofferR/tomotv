@@ -95,7 +95,9 @@ final class SpatialAudio {
     static func refusalKey(inputUrl: String, streamIndex: Int32) -> String {
         guard let url = URLComponents(string: inputUrl) else { return "\(inputUrl)#\(streamIndex)" }
         let source = url.queryItems?.first { $0.name.caseInsensitiveCompare("MediaSourceId") == .orderedSame }?.value ?? ""
-        return "\(url.host ?? ""):\(url.port ?? 0)\(url.path)?\(source)#\(streamIndex)"
+        let scheme = url.scheme?.lowercased() ?? ""
+        let port = url.port ?? ["http": 80, "https": 443][scheme] ?? 0
+        return "\(scheme)://\(url.host?.lowercased() ?? ""):\(port)\(url.path)?\(source)#\(streamIndex)"
     }
 
     static func disposition(of error: Error) -> Disposition {

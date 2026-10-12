@@ -472,6 +472,8 @@ final class SpatialAudioTests: XCTestCase {
         XCTAssertNotEqual(key(url), key(url.replacingOccurrences(of: "MediaSourceId=one", with: "MediaSourceId=two")))
         XCTAssertNotEqual(key(url), key(url.replacingOccurrences(of: "a.test", with: "b.test")))
         XCTAssertNotEqual(key(url), SpatialAudio.refusalKey(inputUrl: url, streamIndex: 2))
+        XCTAssertNotEqual(key("http://a.test/Videos/item/stream"), key("https://a.test/Videos/item/stream"))
+        XCTAssertEqual(key("https://a.test/Videos/item/stream"), key("https://A.test:443/Videos/item/stream"))
     }
 
     /// Beside a ladder whose rungs carry the server's audio under the same names, the spatial track
