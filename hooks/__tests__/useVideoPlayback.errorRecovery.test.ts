@@ -333,6 +333,15 @@ describe("planLiveErrorRecovery", () => {
     expect(planLiveErrorRecovery({ ...base, mode: "transcode", lane: "server" })).toEqual({ reopen: false, toServer: false, retry: false });
   });
 
+  it("waits out an audio server restart on the same lane, spending neither the fresh open nor the server", () => {
+    expect(planLiveErrorRecovery({ ...base, audioSessionExpired: true })).toEqual({ reopen: false, toServer: false, retry: true, waitForAudio: true });
+    expect(planLiveErrorRecovery({ ...base, mode: "transcode", lane: "server", hasReopened: true, audioSessionExpired: true }).retry).toBe(true);
+  });
+
+  it("takes the live ladder once the audio reopens are spent", () => {
+    expect(planLiveErrorRecovery({ ...base, audioSessionExpired: true, audioResetReopens: AUDIO_RESET_REOPENS })).toEqual({ reopen: true, toServer: false, retry: true });
+  });
+
   it("ends at the error after the one reopen when the server rung is ruled out", () => {
     expect(planLiveErrorRecovery({ ...base, serverTranscodingAllowed: false })).toEqual({ reopen: true, toServer: false, retry: true });
     expect(planLiveErrorRecovery({ ...base, hasReopened: true, serverTranscodingAllowed: false })).toEqual({ reopen: false, toServer: false, retry: false });
