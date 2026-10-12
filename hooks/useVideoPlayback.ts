@@ -2234,14 +2234,16 @@ export function useVideoPlayback(config: VideoPlaybackConfig): VideoPlaybackResu
       // A reopen is already waiting out the audio server's restart: the dead player's later errors are that restart.
       if (audioResetRef.current.timer) return;
       const audioSessionExpired = isAudioSessionExpired(error.error);
-      // Every player made before the audio server is back fails at creation; the same lane reopens after it.
-      const waitOutAudioServer = (reopenLane: () => void, position: number | null) => {
+      // Every player made before the audio server is back fails at creation; the same lane reopens after it,
+      // directly, since the reducer ends a server channel's PLAYER_ERROR.
+      const waitOutAudioServer = (position: number | null) => {
+        const attempt = requestIdRef.current;
         const reopens = ++audioResetRef.current.reopens;
         logger.warn("The system audio server restarted, reopening the same lane once it is back", { service: "useVideoPlayback", lane: currentMode, position, reopens });
         probeEmit("audioReset", { lane: currentMode, reopens, ...(position != null ? { position: Math.round(position) } : {}) });
         audioResetRef.current.timer = setTimeout(() => {
           audioResetRef.current.timer = null;
-          reopenLane();
+          if (isMountedRef.current && requestIdRef.current === attempt) restartAtPlayhead();
         }, AUDIO_RESET_WAIT_MS);
       };
 
@@ -2280,15 +2282,17 @@ export function useVideoPlayback(config: VideoPlaybackConfig): VideoPlaybackResu
             setStreamUrl(null);
           }
         }
+        if (waitForAudio) {
+          waitOutAudioServer(null);
+          return;
+        }
         const attempt = requestIdRef.current;
-        const report = () => {
+        setImmediate(() => {
           if (!isMountedRef.current || requestIdRef.current !== attempt) return;
           const serverOff = retry ? undefined : serverOffForError(error.error, errorType, serverTranscodeBlock(videoDetails), false);
           const ref = { id: errorIdOf(error.error, PLAYBACK_ERROR_IDS.AVPLAYER), lane: laneTagFor(transportRef.current, false), native: nativeErrorOf(error.error) };
           dispatch({ type: "PLAYER_ERROR", error: { message: getPlaybackErrorMessage(errorType), ref, ...(serverOff ? { serverOff } : {}) }, mode: currentMode, hasTriedTranscode: !retry });
-        };
-        if (waitForAudio) waitOutAudioServer(report, null);
-        else setImmediate(report);
+        });
         return;
       }
 
@@ -2354,9 +2358,7 @@ export function useVideoPlayback(config: VideoPlaybackConfig): VideoPlaybackResu
       });
 
       if (decision.action.kind === "reopenAfterAudioReset") {
-        waitOutAudioServer(() => {
-          if (isMountedRef.current && requestIdRef.current === attempt) restartAtPlayhead();
-        }, decision.carryPositionSec);
+        waitOutAudioServer(decision.carryPositionSec);
         return;
       }
 

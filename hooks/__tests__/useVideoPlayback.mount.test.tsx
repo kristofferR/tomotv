@@ -1855,6 +1855,29 @@ describe("useVideoPlayback (mounted)", () => {
       }
     });
 
+    it("waits out an audio server restart on the server lane instead of ending the channel", async () => {
+      jest.useFakeTimers({ doNotFake: ["queueMicrotask"] });
+      try {
+        mockDetails.mockResolvedValue(liveChannel({ liveStreamUrl: undefined }));
+        const { ref } = await mount({ videoId: "video-1" });
+        expect(ref.current!.get().sourceUri).toBe(SERVER_MASTER);
+        await act(async () => {
+          ref.current!.get().videoCallbacks.onError({ error: EXPIRED_AUDIO_SESSION } as never);
+        });
+        expect(mockProbeEmit).toHaveBeenCalledWith("audioReset", { lane: "transcode", reopens: 1 });
+        await act(async () => jest.advanceTimersByTime(AUDIO_RESET_WAIT_MS));
+        await act(async () => {
+          jest.advanceTimersByTime(1);
+          for (let hop = 0; hop < 30; hop++) await Promise.resolve();
+        });
+        expect(ref.current!.get().state.type).not.toBe("ERROR");
+        expect(mockDetails).toHaveBeenCalledTimes(2);
+        expect(ref.current!.get().sourceUri).toBe(SERVER_MASTER);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
     it("reopens on the engine after one drop, moves to the server after the second, and errors on the server's", async () => {
       const { ref } = await mount({ videoId: "video-1" });
       expect(ref.current!.get().sourceUri).toBe("http://127.0.0.1:9999/s/abc/master.m3u8");
