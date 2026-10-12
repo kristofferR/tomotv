@@ -7,15 +7,19 @@ import { APP_ABOUT_LINE, APP_BUILD_LABEL } from "@/constants/app";
 import { BUNDLED_PACKAGES, BUNDLED_PACKAGES_DECLARED_ONLY } from "@/constants/bundled-licenses";
 import { COLORS } from "@/constants/colors";
 import { CREDITS, LGPL3_NOTE, LGPL_SOURCE_NOTICE, LICENSE_TEXTS, type Credit } from "@/constants/licenses";
-import { licenseParagraphs } from "@/utils/licenseParagraphs";
+import { licenseChunks, licenseParagraphs } from "@/utils/licenseParagraphs";
+import { spatialAudioNotices } from "@keiver/tomo-engine";
 import { useRouter } from "expo-router";
 import { useHeaderHeight } from "expo-router/react-navigation";
 import React, { useCallback, useRef, useState } from "react";
-import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Platform, Pressable, ScrollView, StyleSheet, Text, TVTextScrollView, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { t } from "@/services/i18n";
 
 const IS_TV = Platform.isTV;
+
+/** Components whose package ships notices of its own, loaded on the row's first expansion. */
+const OWN_NOTICES: Record<string, () => Promise<string | null>> = { SpatialAudioBridge: spatialAudioNotices };
 
 const BUNDLED_PACKAGE_COUNT = BUNDLED_PACKAGES.length + BUNDLED_PACKAGES_DECLARED_ONLY.length;
 
@@ -33,10 +37,19 @@ export default function LicensesScreen() {
   const insets = useSafeAreaInsets();
   const headerHeight = useHeaderHeight();
   const [expandedName, setExpandedName] = useState<string | null>(null);
+  // A component's own notices, loaded on its first expansion; the shared text shows until then.
+  const [ownTexts, setOwnTexts] = useState<Record<string, string>>({});
 
-  const toggle = useCallback((credit: Credit) => {
-    setExpandedName((prev) => (prev === credit.name ? null : credit.name));
-  }, []);
+  const toggle = useCallback(
+    (credit: Credit) => {
+      setExpandedName((prev) => (prev === credit.name ? null : credit.name));
+      if (ownTexts[credit.name]) return;
+      void OWN_NOTICES[credit.name]?.().then((text) => {
+        if (text) setOwnTexts((prev) => ({ ...prev, [credit.name]: text }));
+      });
+    },
+    [ownTexts],
+  );
 
   // tvOS refuses a focus update leaving a ScrollView that is scrolled even slightly
   // (RCTScrollViewComponentView.shouldUpdateFocusInContext), so Down off the list's last
@@ -48,7 +61,18 @@ export default function LicensesScreen() {
 
   const credits = CREDITS.map((credit, index) => {
     const expanded = expandedName === credit.name;
-    const paragraphs = expanded && IS_TV ? licenseParagraphs(LICENSE_TEXTS[credit.license]) : [];
+    const own = ownTexts[credit.name];
+    const licenseText = own ?? LICENSE_TEXTS[credit.license];
+    const paragraphs = expanded && IS_TV && !own ? licenseParagraphs(licenseText) : [];
+    // Notices run to hundreds of kilobytes: plain blocks, on TV in one scroller rather than a focus stop each.
+    const ownChunks =
+      expanded && own
+        ? licenseChunks(own).map((chunk, chunkIndex) => (
+            <Text key={chunkIndex} style={screenStyles.licenseText}>
+              {chunk}
+            </Text>
+          ))
+        : null;
     return (
       <View key={credit.name}>
         <ListRow
@@ -70,7 +94,13 @@ export default function LicensesScreen() {
           <View style={screenStyles.licenseBody}>
             {credit.copyright ? <Text style={screenStyles.copyright}>{credit.copyright}</Text> : null}
             {credit.license === "LGPL-3.0" ? <Text style={screenStyles.copyright}>{LGPL3_NOTE}</Text> : null}
-            {IS_TV ? (
+            {ownChunks ? (
+              IS_TV ? (
+                <TVTextScrollView style={screenStyles.notices}>{ownChunks}</TVTextScrollView>
+              ) : (
+                ownChunks
+              )
+            ) : IS_TV ? (
               paragraphs.map((paragraph, paragraphIndex) => (
                 // Role "text": focusable only so the remote can walk the license, with no
                 // action behind it, and a button trait would promise one.
@@ -79,7 +109,7 @@ export default function LicensesScreen() {
                 </Pressable>
               ))
             ) : (
-              <Text style={screenStyles.licenseText}>{LICENSE_TEXTS[credit.license]}</Text>
+              <Text style={screenStyles.licenseText}>{licenseText}</Text>
             )}
           </View>
         )}
@@ -181,5 +211,8 @@ const screenStyles = StyleSheet.create({
   },
   licenseTextFocused: {
     color: COLORS.TEXT_BRIGHT,
+  },
+  notices: {
+    maxHeight: 640,
   },
 });
