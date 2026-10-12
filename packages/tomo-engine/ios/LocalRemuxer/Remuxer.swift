@@ -176,6 +176,17 @@ final class RemuxSession {
     var lastProducedSegment = 0
 
     var pendingSeekSegment: Int? = nil
+    /// A restart a spatial segment's waiter asked for, past the checks a video seek gets.
+    var pendingSpatialSeek: Int? = nil
+    /// Counts spatial segment waiters; only the newest may ask for a restart.
+    var spatialWaiters = 0
+    /// The preferred track is one APAC could take, so the audio rides its own group whether it does or not.
+    var spatialSplit = false
+    /// A master has gone out; the renditions it named APAC, which can no longer turn into FLAC.
+    var spatialNamed = false
+    var spatialAnnounced: Set<String> = []
+    /// A refused spatial rendition is being rebuilt as FLAC; the master waits for its codecs.
+    var spatialConverting = false
     /// Segment indices with a live segmentURL() request currently waiting on
     /// them, with a count per index (renditions can wait on the same n
     /// concurrently). The producer refuses to throttle while one of these sits
@@ -196,6 +207,8 @@ final class RemuxSession {
     /// Time the segment spent in the Dolby Vision rewrite and the audio encoder, beside the reads.
     var doviSecondsInSegment: Double = 0
     var audioSecondsInSegment: Double = 0
+    var spatialSecondsInSegment: Double = 0
+    var spatialSlowStreak = 0
     /// The muxer's per-packet writes, the fragment flush at the cut, and the segment file write.
     var muxSecondsInSegment: Double = 0
     var flushSecondsInSegment: Double = 0
