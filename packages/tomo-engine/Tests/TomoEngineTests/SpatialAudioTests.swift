@@ -553,6 +553,19 @@ final class SpatialAudioTests: XCTestCase {
         XCTAssertNotNil(session.rendition(withPrefix: "")?.transcoder)
     }
 
+    /// Two sessions failing on one track at once each leave their own replacement on FLAC.
+    func testEachFailedSessionLeavesItsReplacementOnFLAC() {
+        for _ in 0..<2 {
+            let failing = SpatialAudio(prefix: "a0", streamIndex: 1, trueHD: true, priming: 2048, totalFrames: 1,
+                                       dir: FileManager.default.temporaryDirectory, refusalKey: "shared#1")
+            failing.decline("encoder")
+            failing.rememberRefusal(reopening: true)
+        }
+        XCTAssertTrue(SpatialAudio.takesRefusal("shared#1"))
+        XCTAssertTrue(SpatialAudio.takesRefusal("shared#1"))
+        XCTAssertFalse(SpatialAudio.takesRefusal("shared#1"), "a third session converts again")
+    }
+
     /// A refusal holds for one track of one media source on one server, whatever key the URL carries.
     func testRefusalKeysKeepServersAndMediaSourcesApart() {
         let key = { SpatialAudio.refusalKey(inputUrl: $0, streamIndex: 1) }

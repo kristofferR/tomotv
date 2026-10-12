@@ -68,9 +68,19 @@ final class SpatialAudio {
     private var chunkStart: Double?
 
     private static let refusedLock = NSLock()
-    /// Tracks this process carries as FLAC, and those only the next session does: it replaces one that failed on them.
+    /// Tracks this process carries as FLAC, and how many next sessions do: each replaces one that failed on them.
     private static var refused: Set<String> = []
-    private static var refusedNext: Set<String> = []
+    private static var refusedNext: [String: Int] = [:]
+
+    /// The track stays FLAC for the process, or for this one replacement session, which spends the refusal.
+    static func takesRefusal(_ key: String) -> Bool {
+        refusedLock.withLock {
+            if refused.contains(key) { return true }
+            guard let count = refusedNext[key] else { return false }
+            refusedNext[key] = count > 1 ? count - 1 : nil
+            return true
+        }
+    }
 
     /// TrueHD with an Atmos presentation, or DTS-HD MA, whose DTS:X FFmpeg cannot tell from plain
     /// (the library refuses plain as decoding starts), at 48 kHz on systems 26 and later, not over AirPlay.
@@ -88,7 +98,7 @@ final class SpatialAudio {
                      durationSeconds: Double, dir: URL) -> SpatialAudio? {
         let parameters = stream.pointee.codecpar.pointee
         let key = refusalKey(inputUrl: inputUrl, streamIndex: streamIndex)
-        guard eligible(parameters), durationSeconds > 0, !refusedLock.withLock({ refused.contains(key) || refusedNext.remove(key) != nil }),
+        guard eligible(parameters), durationSeconds > 0, !takesRefusal(key),
               #available(macOS 26, iOS 26, tvOS 26, *), let priming = try? APACConfiguration().encoderPrimingDuration() else { return nil }
         return SpatialAudio(prefix: prefix, streamIndex: streamIndex, trueHD: parameters.codec_id == AV_CODEC_ID_TRUEHD, priming: priming.value,
                             totalFrames: Int64((durationSeconds * sampleRate).rounded(.up)), dir: dir, refusalKey: key)
@@ -172,7 +182,9 @@ final class SpatialAudio {
     func rememberRefusal(reopening: Bool) {
         let remembered = lock.withLock { remembers }
         guard remembered || reopening else { return }
-        Self.refusedLock.withLock { _ = remembered ? Self.refused.insert(refusalKey) : Self.refusedNext.insert(refusalKey) }
+        Self.refusedLock.withLock {
+            if remembered { Self.refused.insert(refusalKey) } else { Self.refusedNext[refusalKey, default: 0] += 1 }
+        }
     }
 
     /// A new read generation: the running session ends and its late fragments are dropped.
