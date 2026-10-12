@@ -3,7 +3,7 @@
 ## 1.1.0
 
 - On tvOS, iOS and macOS 26 and later the preferred audio track, when it is TrueHD with an Atmos presentation or DTS-HD MA carrying DTS:X, becomes APAC 7.1.4 through SpatialAudioBridge 1.5, on an audio-only rendition with its own 3.2 s grid. The library refuses plain DTS-HD MA as decoding starts and the track plays as FLAC; content refusals and a conversion slower than realtime are remembered for the process, before any engine verdict. A timestamp jump starts a new session at the segment it interrupted, padded with silence; one in the last packets sends the track to FLAC.
-- `SpatialAudioOutput.follow(_:id:)` and `release(id:)`: on tvOS the library's `AtmosOutputActivator` follows the player while a spatial rendition is selected; on iOS AirPlay sends the track back to FLAC.
+- `SpatialAudioOutput.follow(_:id:)` and `release(id:)`: the library's `AtmosOutputActivator` follows the player while a spatial rendition is selected, on iOS outside AirPlay, which sends the track back to FLAC.
 - `spatialAudioNotices()` resolves SpatialAudioBridge's license notices, with those of its decoders, Rust crates and the Rust standard library.
 - An engine failure carries `spatialAudio` when a track the master named APAC goes back to FLAC; reopening the engine plays it as FLAC.
 

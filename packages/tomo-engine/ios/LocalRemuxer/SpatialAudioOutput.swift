@@ -10,20 +10,22 @@ import AVFoundation
 import Foundation
 import SpatialAudioPlayback
 
-/// Follows the players of engine sessions: on Apple TV it keeps the output in Dolby Atmos while the
-/// selected audio is spatial, on iPhone and iPad it sends spatial tracks back to FLAC over AirPlay.
+/// Follows the players of engine sessions: the library's AtmosOutputActivator plays beside a player
+/// while its selected audio is spatial, except over AirPlay, which sends spatial tracks back to FLAC.
 public enum SpatialAudioOutput {
     private struct Session {
         var names: Set<String>
         weak var session: RemuxSession?
     }
 
+    private typealias Follower = (activator: AnyObject, airPlay: NSKeyValueObservation?)
+
     private static let lock = NSLock()
     /// Spatial rendition names per session token, as each master named them.
     private static var sessions: [String: Session] = [:]
     /// Players whose AirPlay receiver could not reach the loopback, by follow id.
     private static var external: Set<String> = []
-    @MainActor private static var followers: [String: AnyObject] = [:]
+    @MainActor private static var followers: [String: Follower] = [:]
 
     /// A player plays over AirPlay: no session converts until it stops.
     static var externalPlayback: Bool { lock.withLock { !external.isEmpty } }
@@ -33,15 +35,23 @@ public enum SpatialAudioOutput {
         DispatchQueue.main.async {
             MainActor.assumeIsolated {
                 guard #available(macOS 26, iOS 26, tvOS 26, *) else { return }
-                #if os(tvOS)
                 let activator = AtmosOutputActivator()
+                #if os(tvOS)
                 activator.attach(to: player) { playsSpatialAudio($0) }
-                (followers.updateValue(activator, forKey: id) as? AtmosOutputActivator)?.detach()
+                let airPlay: NSKeyValueObservation? = nil
                 #else
-                followers[id] = player.observe(\.isExternalPlaybackActive, options: [.initial, .new]) { player, _ in
-                    externalPlayback(player.isExternalPlaybackActive, id: id, item: player.currentItem)
+                let airPlay = player.observe(\.isExternalPlaybackActive, options: [.initial, .new]) { player, _ in
+                    let active = player.isExternalPlaybackActive
+                    externalPlayback(active, id: id, item: player.currentItem)
+                    DispatchQueue.main.async {
+                        MainActor.assumeIsolated {
+                            guard followers[id]?.activator === activator else { return }
+                            if active { activator.detach() } else { activator.attach(to: player) { playsSpatialAudio($0) } }
+                        }
+                    }
                 }
                 #endif
+                stop(followers.updateValue((activator, airPlay), forKey: id))
             }
         }
     }
@@ -49,15 +59,18 @@ public enum SpatialAudioOutput {
     public static func release(id: String) {
         DispatchQueue.main.async {
             MainActor.assumeIsolated {
-                guard #available(macOS 26, iOS 26, tvOS 26, *) else { return }
-                #if os(tvOS)
-                (followers.removeValue(forKey: id) as? AtmosOutputActivator)?.detach()
-                #else
-                (followers.removeValue(forKey: id) as? NSKeyValueObservation)?.invalidate()
+                stop(followers.removeValue(forKey: id))
+                #if !os(tvOS)
                 externalPlayback(false, id: id, item: nil)
                 #endif
             }
         }
+    }
+
+    @MainActor private static func stop(_ follower: Follower?) {
+        follower?.airPlay?.invalidate()
+        guard #available(macOS 26, iOS 26, tvOS 26, *) else { return }
+        (follower?.activator as? AtmosOutputActivator)?.detach()
     }
 
     /// An AirPlay receiver cannot reach the phone's loopback: a session playing spatial audio reopens as FLAC.

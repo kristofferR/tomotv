@@ -264,7 +264,7 @@ process remembers content refusals (`.decoding`, `.invalidConfiguration`) and a 
 than realtime, which goes back to FLAC before any engine verdict; a timestamp jump starts a new
 session at the segment it interrupted, and one in the last packets costs the track for that
 session. `SpatialAudioOutput` attaches the library's `AtmosOutputActivator` to react-native-video's
-player through its plugin API on tvOS; on iOS, AirPlay sends the track back to FLAC.
+player through its plugin API, on iOS outside AirPlay, which sends the track back to FLAC.
 
 **One uncarriable track no longer condemns a file.** The carriable tracks are
 kept and the rest dropped; only a file with no carriable track at all declines.
