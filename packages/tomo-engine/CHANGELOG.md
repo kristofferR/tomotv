@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.0
+
+- On tvOS, iOS and macOS 26 and later the preferred audio track, when it is TrueHD with an Atmos presentation or DTS-HD MA carrying DTS:X, becomes APAC 7.1.4 through SpatialAudioBridge 1.5, on an audio-only rendition with its own 3.2 s grid. The library refuses plain DTS-HD MA as decoding starts and the track plays as FLAC; content refusals and a conversion slower than realtime are remembered for the process, before any engine verdict. A timestamp jump starts a new session at the segment it interrupted, padded with silence; one in the last packets sends the track to FLAC.
+- `SpatialAudioOutput.follow(_:id:)` and `release(id:)`: the library's `AtmosOutputActivator` follows the player while a spatial rendition is selected, on iOS outside AirPlay, which sends the track back to FLAC.
+- `spatialAudioNotices()` resolves SpatialAudioBridge's license notices, with those of its decoders, Rust crates and the Rust standard library.
+- An engine failure carries `spatialAudio` when a track the master named APAC goes back to FLAC; reopening the engine plays it as FLAC.
+
 ## 1.0.1
 
 - An I-frame rendition for scrubbing on every VOD session with video: `#EXT-X-I-FRAME-STREAM-INF` beside the copy, ladder or not. Entries are the demuxer's keyframes where it indexes them (Matroska, WebM, MP4/MOV, AVI), else the segment grid. Each is the keyframe in a fragment of its own over a video-only init, read through a `FrameGrabber` of its own. The rendition is always SDR (HLS authoring spec 6.16): the keyframe is copied for an SDR picture inside 1920x1080 that the session copies, and otherwise encoded as H.264 High 4.0 inside 1920x1080, PQ and HLG tone-mapped to BT.709; Dolby Vision profile 5 gets none. The line declares RFC 8216's peak and AVERAGE-BANDWIDTH, each sample lasts until the next fragment's tfdt, and playlists go out gzip-encoded. A frame that cannot be read is answered with the nearest made one, never a miss.
