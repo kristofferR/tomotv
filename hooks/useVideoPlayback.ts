@@ -86,7 +86,7 @@ import {
 } from "@/services/subtitlePreference";
 import { audioLanguageToStore, getAudioPreferenceSync, preferredAudioStreamIndex, readAudioPreference, saveAudioPreference } from "@/services/audioPreference";
 import { refreshTrackSettings } from "@/services/jellyfin/trackSettings";
-import { PlaybackErrorType, classifyPlaybackError, getPlaybackErrorMessage } from "@/utils/errorClassification";
+import { PlaybackErrorType, classifyPlaybackError, getPlaybackErrorMessage, isAudioSessionExpired } from "@/utils/errorClassification";
 import { t } from "@/services/i18n";
 import { errorIdOf, formatErrorRef, IdentifiedError, nativeErrorOf, PLAYBACK_ERROR_IDS, type LaneTag, type PlaybackErrorId } from "@/utils/errorIds";
 import { IS_MAC } from "@/utils/hostEnvironment";
@@ -96,6 +96,7 @@ import { QUALITY_PRESETS, type QualityPreset } from "@/services/jellyfin/constan
 import { getQualitySettings } from "@/services/jellyfin/session";
 import { videoPlayerReducer, type PlaybackMode, type PlaybackTransport, type VideoPlayerState } from "./videoPlayback/machine";
 import {
+  AUDIO_RESET_WAIT_MS,
   automaticRetryDelay,
   engineSpentWithoutServer,
   planErrorRecovery,
@@ -340,6 +341,8 @@ export function useVideoPlayback(config: VideoPlaybackConfig): VideoPlaybackResu
   // One engine restart per item for a mid-playback starvation (see planErrorRecovery).
   // Refs, not state: nothing renders on them, and onError reads them synchronously.
   const hasTriedRemuxRestartRef = useRef(false);
+  // Reopens spent on audio server restarts this item, and the one waiting out the current restart.
+  const audioResetRef = useRef<{ reopens: number; timer: ReturnType<typeof setTimeout> | null }>({ reopens: 0, timer: null });
   // The engine's own segment clock for this session (Remuxer.reportThroughput): the last
   // few samples, the subscription that feeds them, and whether they already moved playback.
   const throughputRef = useRef<ThroughputWatch>({ samples: [], unsubscribe: null, handedOver: false });
@@ -1667,6 +1670,9 @@ export function useVideoPlayback(config: VideoPlaybackConfig): VideoPlaybackResu
         setPlaybackStage(preparedTransport === "server" ? "server" : preparedTransport === "direct" ? "reading" : "player");
         // A new stream remounts the player, which starts paused; a live reload keeps the one player.
         if (!isLiveRef.current) playerPlayingRef.current = false;
+        // A wait on the audio server belongs to the stream this one replaces: its errors are this stream's own.
+        if (audioResetRef.current.timer) clearTimeout(audioResetRef.current.timer);
+        audioResetRef.current.timer = null;
         streamGenerationRef.current += 1;
         streamUrlRef.current = url;
         setStreamUrl(url);
@@ -2141,19 +2147,36 @@ export function useVideoPlayback(config: VideoPlaybackConfig): VideoPlaybackResu
       // Extract error message from react-native-video error object
       const originalMessage = error.error?.localizedDescription || error.error?.errorString || String(error.error || "");
       const errorType = classifyPlaybackError(error.error);
+      // A reopen is already waiting out the audio server's restart: the dead player's later errors are that restart.
+      if (audioResetRef.current.timer) return;
+      const audioSessionExpired = isAudioSessionExpired(error.error);
+      // Every player made before the audio server is back fails at creation; the same lane reopens after it,
+      // directly, since the reducer ends a server channel's PLAYER_ERROR.
+      const waitOutAudioServer = (position: number | null) => {
+        const attempt = requestIdRef.current;
+        const reopens = ++audioResetRef.current.reopens;
+        logger.warn("The system audio server restarted, reopening the same lane once it is back", { service: "useVideoPlayback", lane: currentMode, position, reopens });
+        probeEmit("audioReset", { lane: currentMode, reopens, ...(position != null ? { position: Math.round(position) } : {}) });
+        audioResetRef.current.timer = setTimeout(() => {
+          audioResetRef.current.timer = null;
+          if (isMountedRef.current && requestIdRef.current === attempt) restartAtPlayhead();
+        }, AUDIO_RESET_WAIT_MS);
+      };
 
       if (isLiveRef.current) {
-        const { reopen, toServer, retry } = planLiveErrorRecovery({
+        const { reopen, toServer, retry, waitForAudio } = planLiveErrorRecovery({
           mode: currentMode,
           errorType,
           hasReopened: liveReopenedRef.current,
           lane: liveLaneRef.current,
           serverTranscodingAllowed: !videoDetails || serverTranscodeAllowed(videoDetails),
+          audioSessionExpired,
+          audioResetReopens: audioResetRef.current.reopens,
         });
         if (reopen) liveReopenedRef.current = true;
         if (toServer) liveLaneRef.current = "server";
         if (retry) setPlaybackStage("reopening");
-        logger.error("Live playback error", error, { service: "useVideoPlayback", lane: currentMode, next: reopen ? "reopen" : toServer ? "server" : "error" });
+        logger.error("Live playback error", error, { service: "useVideoPlayback", lane: currentMode, next: waitForAudio ? "same lane" : reopen ? "reopen" : toServer ? "server" : "error" });
         probeEmit("error", { mode: currentMode, message: originalMessage, willRetry: retry });
         stopLocalRemux(localRemuxTokenRef.current);
         localRemuxTokenRef.current = null;
@@ -2174,6 +2197,10 @@ export function useVideoPlayback(config: VideoPlaybackConfig): VideoPlaybackResu
             streamUrlRef.current = null;
             setStreamUrl(null);
           }
+        }
+        if (waitForAudio) {
+          waitOutAudioServer(null);
+          return;
         }
         const attempt = requestIdRef.current;
         setImmediate(() => {
@@ -2201,6 +2228,8 @@ export function useVideoPlayback(config: VideoPlaybackConfig): VideoPlaybackResu
         networkGateway: transportRef.current === "gateway" && !playsFromDisk(videoId),
         serverTranscodingAllowed: !videoDetails || serverTranscodeAllowed(videoDetails),
         hasRetriedGateway: gatewayRetriedRef.current,
+        audioSessionExpired,
+        audioResetReopens: audioResetRef.current.reopens,
       });
       const { willRetryWithTranscode } = decision;
 
@@ -2243,6 +2272,11 @@ export function useVideoPlayback(config: VideoPlaybackConfig): VideoPlaybackResu
         willRetryWithTranscode,
         hasTriedCredentialRefresh,
       });
+
+      if (decision.action.kind === "reopenAfterAudioReset") {
+        waitOutAudioServer(decision.carryPositionSec);
+        return;
+      }
 
       // One engine restart for a mid-playback starvation: the file was playing fine,
       // the feed stalled, a fresh session at the playhead beats a server transcode.
@@ -2752,6 +2786,7 @@ export function useVideoPlayback(config: VideoPlaybackConfig): VideoPlaybackResu
       requestIdRef.current += 1;
       if (gatewayRecoveryRef.current) clearTimeout(gatewayRecoveryRef.current.timer);
       gatewayRecoveryRef.current = null;
+      if (audioResetRef.current.timer) clearTimeout(audioResetRef.current.timer);
 
       // Clear timers
       if (autoPlayTimerRef.current) {
@@ -2897,6 +2932,8 @@ export function useVideoPlayback(config: VideoPlaybackConfig): VideoPlaybackResu
     setHasTriedCredentialRefresh(false);
     setHasTriedSeekRecovery(false);
     hasTriedRemuxRestartRef.current = false;
+    if (audioResetRef.current.timer) clearTimeout(audioResetRef.current.timer);
+    audioResetRef.current = { reopens: 0, timer: null };
     copyRebuiltRef.current = false;
     liveReopenedRef.current = false;
     liveLaneRef.current = "engine";
@@ -3241,6 +3278,8 @@ export function useVideoPlayback(config: VideoPlaybackConfig): VideoPlaybackResu
     setHasTriedTranscoding(false);
     setHasTriedSeekRecovery(false);
     hasTriedRemuxRestartRef.current = false;
+    if (audioResetRef.current.timer) clearTimeout(audioResetRef.current.timer);
+    audioResetRef.current = { reopens: 0, timer: null };
     copyRebuiltRef.current = false;
     liveReopenedRef.current = false;
     liveLaneRef.current = "engine";

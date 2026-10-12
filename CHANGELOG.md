@@ -36,6 +36,7 @@ All notable changes to Tomo TV are documented here.
 
 ### Fixed
 
+- When the system restarts its audio server mid-start, playback reopens on the same stream at the playhead instead of falling to the server's low-quality stereo streams
 - On Apple TV with automatic subtitles on, the subtitle track the system marks On loads
 - A download the server converts played without its saved subtitles (since 2.2.2)
 - Pausing a download the server converts restarted it from zero: Jellyfin streams a conversion with no ranges to resume from, so its row has no pause
