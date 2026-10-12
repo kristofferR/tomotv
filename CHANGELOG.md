@@ -6,6 +6,7 @@ All notable changes to Tomo TV are documented here.
 
 ### Added
 
+- On Apple TV, iPhone and iPad with tvOS or iOS 26, a preferred TrueHD Atmos or DTS:X track plays as Apple's spatial audio (APAC) instead of FLAC, which kept only the 7.1 bed. Other tracks and older systems play as before
 - Server transcoding, in Settings: when the server may be asked to transcode on this device. "When needed" (the default) also sends smaller server streams on a slow connection; "Only for unsupported files" never transcodes for the connection, so a file plays as it is or buffers; "Off" plays only what the device supports. The card ends with the server's own setting for the account, its state in green or red, and the levels are disabled while the server refuses video transcoding
 - Themes, in Settings > Appearance: Gold, Blue, Green or Purple, or a colour of your own from a swatch grid, a hex code or hue, saturation and brightness sliders, named when saved. The app's accent takes the theme's colour, and the editor warns when a colour is hard to see on the dark background. Saved themes are kept in the Jellyfin user's display preferences, so every device signed in as that user lists them; removing one removes it everywhere, and each device keeps its own pick
 - Folder color, in Settings > Appearance, turns a folder's blurred artwork background on or off (on by default)
