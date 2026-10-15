@@ -30,7 +30,7 @@ Pod::Spec.new do |s|
   # TrueHD Atmos and DTS:X to APAC; Package.swift declares the same package for the host tests.
   spm_dependency(s,
     url: "https://github.com/kristofferR/SpatialAudioBridge",
-    requirement: { kind: "upToNextMajorVersion", minimumVersion: "1.6.1" },
+    requirement: { kind: "upToNextMajorVersion", minimumVersion: "1.6.2" },
     products: ["SpatialAudioBridge", "SpatialAudioPlayback"]
   )
 
