@@ -267,6 +267,9 @@ extension RemuxSession {
     /// Restarts for one segment that each opened past its start before it is published short instead.
     static let partialOpenLookback = 3
 
+    /// Seeks again for a seek back that left the read position where it was.
+    static let silentSeekRetries = 2
+
     /// Where a restart for `segment` seeks: its own start, then one segment earlier per opening that
     /// landed past it. MPEG-TS starts a segment early: its seek lands on a packet, not a keyframe.
     /// A byte-estimated TS seek aims this far before its target, each retry this much further.
@@ -1962,7 +1965,18 @@ extension RemuxSession {
                 seekRet = avformat_seek_file(input, -1, Int64.min, pos, pos, SWIFT_AVSEEK_FLAG_BYTE)
                 byteSeek = (targetSeconds, 1)
             } else {
-                seekRet = avformat_seek_file(input, -1, Int64.min, targetUs, targetUs, SWIFT_AVSEEK_FLAG_BACKWARD)
+                let before = input.pointee.pb.map { avio_tell($0) }
+                var ret = avformat_seek_file(input, -1, Int64.min, targetUs, targetUs, SWIFT_AVSEEK_FLAG_BACKWARD)
+                // A seek whose new HTTP connection times out reads on from the old one, and FFmpeg's Matroska
+                // seek still reports success: a seek back that left the read where it was seeks again.
+                var retries = 0
+                while ret >= 0, seekSegment <= currentSegment, retries < Self.silentSeekRetries,
+                      let before, let pb = input.pointee.pb, avio_tell(pb) == before {
+                    retries += 1
+                    NSLog("[LocalRemuxer] Seek for segment %d left the read where it was, seeking again", segment)
+                    ret = avformat_seek_file(input, -1, Int64.min, targetUs, targetUs, SWIFT_AVSEEK_FLAG_BACKWARD)
+                }
+                seekRet = ret
                 byteSeek = nil
             }
             if seekRet < 0 {
