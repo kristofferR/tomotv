@@ -233,7 +233,11 @@ final class SpatialAudio {
 
     /// The input ended: the session pads to the playlist's end and delivers its last segments.
     func finish() {
-        guard #available(macOS 26, iOS 26, tvOS 26, *), let transcoder = transcoder else { return }
+        guard #available(macOS 26, iOS 26, tvOS 26, *) else { return }
+        guard let transcoder = transcoder else {
+            if !lock.withLock({ finishing }) { decline("the input ended before a spatial session could start") }
+            return
+        }
         let jumpedAtEnd = lock.withLock { () -> Bool in
             finishing = true
             guard jumped, refusal == nil else { return false }
@@ -270,11 +274,14 @@ final class SpatialAudio {
     @available(macOS 26, iOS 26, tvOS 26, *)
     private var transcoder: SpatialAudioTranscoder? { session as? SpatialAudioTranscoder }
 
-    private func isSyncPoint(_ bytes: Data) -> Bool {
-        // A TrueHD major sync, or a DTS core sync.
+    func isSyncPoint(_ bytes: Data) -> Bool {
+        // TrueHD major sync, or DTS core (16/14-bit, either endian) or DTS-HD substream sync.
         let head = [UInt8](bytes.prefix(8))
         if trueHD { return head.count == 8 && head[4...7] == [0xF8, 0x72, 0x6F, 0xBA] }
-        return head.starts(with: [0x7F, 0xFE, 0x80, 0x01])
+        let syncWords: [[UInt8]] = [[0x7F, 0xFE, 0x80, 0x01], [0xFE, 0x7F, 0x01, 0x80],
+                                    [0x1F, 0xFF, 0xE8, 0x00], [0xFF, 0x1F, 0x00, 0xE8],
+                                    [0x64, 0x58, 0x20, 0x25]]
+        return syncWords.contains { head.starts(with: $0) }
     }
 
     /// Opens a session at a sync packet. Its first segment is the first grid index whose audio, after
@@ -355,34 +362,57 @@ final class SpatialAudio {
     }
 
     /// A file the cache will not take leaves its request nothing to serve: the track goes back to FLAC for the session.
-    private func refuseWrite(_ name: String, _ error: Error) {
+    private func refuseWrite(_ name: String, _ error: Error, generation: Int) {
         let reason = "could not write \(name): \(error.localizedDescription)"
-        NSLog("[LocalRemuxer] spatial %@ refused: %@", prefix, reason)
-        decline(reason)
+        let refused = lock.withLock { () -> Bool in
+            guard self.generation == generation, refusal == nil else { return false }
+            refusal = reason
+            return true
+        }
+        if refused { NSLog("[LocalRemuxer] spatial %@ refused: %@", prefix, reason) }
+    }
+
+    /// Publication and reset share the lock: a staged fragment from an older session never replaces a file.
+    func install(_ staged: URL, index: Int?, generation: Int) throws {
+        try lock.withLock {
+            guard self.generation == generation, index != nil || !initWritten else { return }
+            let name = index.map(segmentName) ?? initName
+            guard rename(staged.path, dir.appendingPathComponent(name).path) == 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            if let index {
+                completed.insert(index)
+                highest = max(highest, index)
+                accepted = true
+            } else {
+                initWritten = true
+            }
+        }
     }
 
     @available(macOS 26, iOS 26, tvOS 26, *)
     private func deliver(_ segment: APACSegment, generation: Int) {
+        let staged = dir.appendingPathComponent(".\(prefix)-\(generation)-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: staged) }
         switch segment.kind {
         case .initialization:
             // Every session writes the same initialization apart from its creation time.
             guard lock.withLock({ self.generation == generation && !initWritten }) else { return }
-            do { try segment.data.write(to: dir.appendingPathComponent(initName), options: .atomic) } catch { return refuseWrite(initName, error) }
-            lock.withLock { initWritten = true }
+            do {
+                try segment.data.write(to: staged)
+                try install(staged, index: nil, generation: generation)
+            } catch {
+                refuseWrite(initName, error, generation: generation)
+            }
         case .media:
             guard let start = segment.startTime else { return }
             let index = Int((start.seconds * Self.sampleRate / Double(Self.segmentFrames)).rounded())
             guard lock.withLock({ self.generation == generation && first.map { index >= $0 } == true }) else { return }
             do {
-                try RemuxSession.writeSegment(segment.data, lead: RemuxSession.stypBox, to: dir.appendingPathComponent(segmentName(index)))
+                try RemuxSession.writeSegment(segment.data, lead: RemuxSession.stypBox, to: staged)
+                try install(staged, index: index, generation: generation)
             } catch {
-                return refuseWrite(segmentName(index), error)
-            }
-            lock.withLock {
-                guard self.generation == generation else { return }
-                completed.insert(index)
-                highest = max(highest, index)
-                accepted = true
+                refuseWrite(segmentName(index), error, generation: generation)
             }
         }
     }

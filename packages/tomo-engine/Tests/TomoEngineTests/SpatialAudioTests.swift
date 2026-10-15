@@ -220,9 +220,9 @@ final class SpatialAudioTests: XCTestCase {
     }
 
     /// A session whose pipeline never runs, holding one spatial rendition the test drives by hand.
-    private func unstartedSpatialSession() throws -> (RemuxSession, RemuxSession.Rendition, SpatialAudio) {
+    private func unstartedSpatialSession(trueHD: Bool = true) throws -> (RemuxSession, RemuxSession.Rendition, SpatialAudio) {
         let session = try RemuxSession(config: makeConfig(durationSeconds: 60))
-        let spatial = SpatialAudio(prefix: "a0", streamIndex: 1, trueHD: true, priming: 2048, totalFrames: 60 * 48_000, dir: session.dir, refusalKey: "test#1")
+        let spatial = SpatialAudio(prefix: "a0", streamIndex: 1, trueHD: trueHD, priming: 2048, totalFrames: 60 * 48_000, dir: session.dir, refusalKey: "test#1")
         let rendition = RemuxSession.Rendition(prefix: "a0", inputStreams: [1], transcoder: nil)
         rendition.spatial = spatial
         session.stateLock.withLock {
@@ -230,6 +230,55 @@ final class SpatialAudioTests: XCTestCase {
             session.sourceReady = true
         }
         return (session, rendition, spatial)
+    }
+
+    func testDTSSyncPointsAcceptEveryCorePackingAndHDSubstreams() throws {
+        let (session, _, spatial) = try unstartedSpatialSession(trueHD: false)
+        defer { session.stop() }
+        let syncWords: [[UInt8]] = [[0x7F, 0xFE, 0x80, 0x01], [0xFE, 0x7F, 0x01, 0x80],
+                                    [0x1F, 0xFF, 0xE8, 0x00], [0xFF, 0x1F, 0x00, 0xE8],
+                                    [0x64, 0x58, 0x20, 0x25]]
+        for word in syncWords {
+            XCTAssertTrue(spatial.isSyncPoint(Data(word + [0, 0, 0, 0])))
+            XCTAssertFalse(spatial.isSyncPoint(Data(word.prefix(3))))
+        }
+        XCTAssertFalse(spatial.isSyncPoint(Data([0, 0, 0, 0])))
+    }
+
+    func testInputEndingBeforeASpatialSessionStartsFallsBack() throws {
+        guard #available(macOS 26, *) else { throw XCTSkip("SpatialAudioBridge needs macOS 26") }
+        let (session, _, spatial) = try unstartedSpatialSession()
+        defer { session.stop() }
+        spatial.finish()
+        XCTAssertNotNil(spatial.failure)
+        XCTAssertFalse(spatial.isAccepted)
+        spatial.decline("another refusal")
+        let refusal = spatial.failure
+        spatial.finish()
+        XCTAssertEqual(spatial.failure, refusal)
+    }
+
+    func testAStagedSegmentFromBeforeResetCannotReplaceTheCurrentFile() throws {
+        let (session, _, spatial) = try unstartedSpatialSession()
+        defer { session.stop() }
+        let old = session.dir.appendingPathComponent(".old-segment")
+        let current = session.dir.appendingPathComponent(".current-segment")
+        let oldInit = session.dir.appendingPathComponent(".old-init")
+        let currentInit = session.dir.appendingPathComponent(".current-init")
+        for url in [old, oldInit] { try Data([1]).write(to: url) }
+        for url in [current, currentInit] { try Data([2]).write(to: url) }
+
+        spatial.reset()
+        try spatial.install(current, index: 0, generation: 1)
+        try spatial.install(currentInit, index: nil, generation: 1)
+        try spatial.install(old, index: 0, generation: 0)
+        try spatial.install(oldInit, index: nil, generation: 0)
+
+        XCTAssertEqual(try Data(contentsOf: session.dir.appendingPathComponent(spatial.segmentName(0))), Data([2]))
+        XCTAssertEqual(try Data(contentsOf: session.dir.appendingPathComponent(spatial.initName)), Data([2]))
+        XCTAssertTrue(spatial.has(0))
+        XCTAssertTrue(spatial.isAccepted)
+        XCTAssertNil(spatial.failure)
     }
 
     /// AirPlay starting on a player of a session that plays spatial audio sends it back to FLAC, and no
