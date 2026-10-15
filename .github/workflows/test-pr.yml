@@ -8,21 +8,30 @@ permissions:
 
 jobs:
   engine:
-    if: github.repository == 'kristofferR/tomotv' && github.event_name == 'workflow_dispatch'
+    if: github.repository == 'kristofferR/tomotv' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/ci/spatial-validation-20261015'
     runs-on: macos-26
     timeout-minutes: 45
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      CANDIDATE_SHA: fd7698ed94fdd85a5d0719803f5910ee59c26976
     steps:
       - name: Checkout exact validation ref
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Verify source candidate
+        run: |
+          git merge-base --is-ancestor "$CANDIDATE_SHA" HEAD
+          git diff --exit-code "$CANDIDATE_SHA" HEAD -- . ':!.github/workflows/test-pr.yml'
 
       - name: Toolchain and source
         run: |
           git rev-parse HEAD
           xcodebuild -version
+          test "$(xcodebuild -version | head -n 1)" = "Xcode 26.6"
           swift --version
 
       - name: Setup Node.js
@@ -34,19 +43,35 @@ jobs:
       - name: Install locked dependencies
         run: npm ci
 
+      - name: Licenses and package version policy
+        run: |
+          npm run licenses
+          git diff --exit-code constants/bundled-licenses.ts
+          node scripts/package-versions.mjs --check
+          node scripts/package-versions.mjs --files
+
       - name: Fetch pinned engine frameworks
         run: npm run fetch:ffmpeg
 
       - name: Install synthetic-fixture encoder
         run: brew install ffmpeg
 
-      - name: Focused spatial regressions
-        run: >-
-          swift test --package-path packages/tomo-engine
-          --filter 'SpatialAudioTests/(testDTSSyncPointsAcceptEveryCorePackingAndHDSubstreams|testInputEndingBeforeASpatialSessionStartsFallsBack|testAStagedSegmentFromBeforeResetCannotReplaceTheCurrentFile)'
+      - name: Verify and record SpatialAudioBridge pins
+        run: |
+          for package in packages/tomo-engine native/ios; do
+            lock="$package/Package.resolved"
+            jq -e '.pins | length == 1 and .[0].identity == "spatialaudiobridge" and .[0].state.version == "1.6.2" and .[0].state.revision == "14275b11c510596c0f3a361e5da70cec109e99be"' "$lock"
+            jq -S '.pins' "$lock" > "$RUNNER_TEMP/$(basename "$package")-pins.json"
+          done
 
       - name: Existing engine and native package suites
         run: npm run test:engine
+
+      - name: Confirm the three focused regressions ran
+        run: |
+          for name in testDTSSyncPointsAcceptEveryCorePackingAndHDSubstreams testInputEndingBeforeASpatialSessionStartsFallsBack testAStagedSegmentFromBeforeResetCannotReplaceTheCurrentFile; do
+            grep -E "Test Case .*SpatialAudioTests\.$name.*passed" packages/tomo-engine/.build/test.log
+          done
 
       - name: Compile engine for Apple TV
         run: >-
@@ -60,11 +85,13 @@ jobs:
           --scratch-path "$RUNNER_TEMP/tomo-ios"
           --triple arm64-apple-ios16.4 --sdk "$(xcrun --sdk iphoneos --show-sdk-path)"
 
-      - name: Record resolved dependency locks
+      - name: Verify resolved pins stayed unchanged
         if: always()
         run: |
-          cat packages/tomo-engine/Package.resolved
-          cat native/ios/Package.resolved
+          for package in packages/tomo-engine native/ios; do
+            lock="$package/Package.resolved"
+            diff -u "$RUNNER_TEMP/$(basename "$package")-pins.json" <(jq -S '.pins' "$lock")
+          done
 
       - name: Keep validation logs
         if: always()
