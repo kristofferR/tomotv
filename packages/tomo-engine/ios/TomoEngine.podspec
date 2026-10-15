@@ -34,10 +34,10 @@ Pod::Spec.new do |s|
     products: ["SpatialAudioBridge", "SpatialAudioPlayback"]
   )
 
-  # Share SwiftPM's XCFramework staging directory so Xcode collects SpatialAudioCore's
-  # archive signature once. CONFIGURATION_BUILD_DIR keeps the pod's own library separate.
+  # Xcode derives XCFramework staging from CONFIGURATION_BUILD_DIR during archiving.
+  # Share SwiftPM's directory so SpatialAudioCore has one signature collection owner.
   s.pod_target_xcconfig = {
     "DEFINES_MODULE" => "YES",
-    "BUILT_PRODUCTS_DIR" => "$(PODS_CONFIGURATION_BUILD_DIR)"
+    "CONFIGURATION_BUILD_DIR" => "$(PODS_CONFIGURATION_BUILD_DIR)"
   }
 end
