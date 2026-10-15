@@ -3,6 +3,7 @@ export * from "./config";
 export * from "./events";
 export * from "./liveSources";
 export * from "./native";
+export * from "./notices";
 export * from "./posterFrames";
 export * from "./probes";
 export * from "./session";
