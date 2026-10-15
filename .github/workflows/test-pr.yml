@@ -17,7 +17,7 @@ jobs:
         shell: bash
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
-      CANDIDATE_SHA: e45b9f05184c6b7fb33a020c7cb1d04276988a9d
+      CANDIDATE_SHA: 86c1bd9f1e436f2b7f4b7e3871d428483e8cf220
       ARTIFACT_RECIPIENT: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEafGHMwP9NUowbsjvz5a1Rb6hAyTAfGTqVaeGTUexTH
       CI: '1'
       EXPO_TV: '1'
@@ -68,16 +68,36 @@ jobs:
           node scripts/package-versions.mjs --check
           node scripts/package-versions.mjs --files
 
-      - name: Verify passed suites for this exact source candidate
+      - name: Verify passed suites for unchanged native sources
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           tested_workflow=4f069777777ced1d1eeb5825c24b552890ae6d26
-          git diff --exit-code "$CANDIDATE_SHA" "$tested_workflow" -- . ':!.github/workflows/test-pr.yml'
+          git diff --exit-code "$CANDIDATE_SHA" "$tested_workflow" -- \
+            packages/tomo-engine/Package.swift packages/tomo-engine/Package.resolved packages/tomo-engine/ffmpeg-lock.json \
+            packages/tomo-engine/ios/LocalRemuxer packages/tomo-engine/ios/LiveSources packages/tomo-engine/Tests native/ios
           gh api repos/kristofferR/tomotv/actions/runs/38805902651 > "$RUNNER_TEMP/tomo-private/evidence/test-run.json"
           jq -e --arg head "$tested_workflow" '.head_sha == $head and .status == "completed"' "$RUNNER_TEMP/tomo-private/evidence/test-run.json"
           gh api repos/kristofferR/tomotv/actions/jobs/116666558086 > "$RUNNER_TEMP/tomo-private/evidence/test-job.json"
           jq -e '.run_id == 38805902651 and any(.steps[]; .name == "Engine and native package suites" and .conclusion == "success")' "$RUNNER_TEMP/tomo-private/evidence/test-job.json"
+
+      - name: Focused plugin and CocoaPods model regressions
+        run: |
+          npm test -- --runInBand packages/tomo-engine/__tests__/app.plugin.test.js 2>&1 | tee "$RUNNER_TEMP/tomo-private/evidence/plugin-tests.log"
+          npx --no-install eslint packages/tomo-engine/app.plugin.js packages/tomo-engine/__tests__/app.plugin.test.js
+          npx --no-install prettier --check packages/tomo-engine/app.plugin.js packages/tomo-engine/__tests__/app.plugin.test.js packages/tomo-engine/package.json
+          ruby <<'RUBY' > "$RUNNER_TEMP/tomo-private/evidence/cocoapods-model.txt"
+          require 'cocoapods'
+          require_relative 'packages/tomo-engine/ios/spm-build-directory'
+          ['TomoEngine', 'Other'].each do |name|
+            target = Pod::PodTarget.allocate
+            target.define_singleton_method(:pod_name) { name }
+            target.define_singleton_method(:label) { name }
+            expected = name == 'TomoEngine' ? 'shared path' : 'shared path/Other'
+            abort "Wrong build path for #{name}" unless target.configuration_build_dir('shared path') == expected
+            puts "#{name}: #{target.configuration_build_dir('shared path')}"
+          end
+          RUBY
 
       - name: Assemble tvOS project through Expo and CocoaPods
         run: |
@@ -89,7 +109,11 @@ jobs:
           cp ios/Pods/Pods.xcodeproj/project.pbxproj "$RUNNER_TEMP/tomo-private/evidence/Pods.pbxproj"
           cp ios/TomoTV.xcodeproj/project.pbxproj "$RUNNER_TEMP/tomo-private/evidence/TomoTV.pbxproj"
           cp 'ios/Pods/Target Support Files/TomoEngine/TomoEngine.release.xcconfig' "$RUNNER_TEMP/tomo-private/evidence/TomoEngine.release.xcconfig"
-          grep -Fx 'CONFIGURATION_BUILD_DIR = $(PODS_CONFIGURATION_BUILD_DIR)' "$RUNNER_TEMP/tomo-private/evidence/TomoEngine.release.xcconfig"
+          grep -Fx 'CONFIGURATION_BUILD_DIR = ${PODS_CONFIGURATION_BUILD_DIR}' "$RUNNER_TEMP/tomo-private/evidence/TomoEngine.release.xcconfig"
+          if grep -R -n -E 'PODS_CONFIGURATION_BUILD_DIR[^/]*/TomoEngine/' 'ios/Pods/Target Support Files'; then
+            echo 'A consumer still uses the old TomoEngine build directory'
+            exit 1
+          fi
           mkdir -p ios/TomoTV.xcworkspace/xcshareddata/swiftpm
           cp packages/tomo-engine/Package.resolved ios/TomoTV.xcworkspace/xcshareddata/swiftpm/Package.resolved
           mkdir -p ios/Pods/Pods.xcodeproj/project.xcworkspace/xcshareddata/swiftpm
