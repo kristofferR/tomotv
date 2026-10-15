@@ -32,6 +32,7 @@
     "ios/LocalRemuxer",
     "ios/LiveSources",
     "ios/TomoEngine.podspec",
+    "ios/spm-build-directory.rb",
     "ios/TomoLiveSources.podspec",
     "ios/TomoFFmpeg.podspec",
     "scripts",
