@@ -181,7 +181,8 @@ final class SpatialAudio {
     /// A refusal that reopens the engine holds for the reopened session at least, so it cannot loop.
     func rememberRefusal(reopening: Bool) {
         let remembered = lock.withLock { remembers }
-        guard remembered || reopening else { return }
+        // AirPlay already forces the replacement to FLAC, without consulting takesRefusal.
+        guard remembered || (reopening && !SpatialAudioOutput.externalPlayback) else { return }
         Self.refusedLock.withLock {
             if remembered { Self.refused.insert(refusalKey) } else { Self.refusedNext[refusalKey, default: 0] += 1 }
         }

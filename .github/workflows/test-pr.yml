@@ -16,7 +16,7 @@ jobs:
         shell: bash
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
-      CANDIDATE_SHA: 0914ad37cec78745e4efb2a558c30b8c359d2774
+      CANDIDATE_SHA: e45b9f05184c6b7fb33a020c7cb1d04276988a9d
       ARTIFACT_RECIPIENT: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEafGHMwP9NUowbsjvz5a1Rb6hAyTAfGTqVaeGTUexTH
       CI: '1'
       EXPO_TV: '1'
@@ -67,6 +67,13 @@ jobs:
           node scripts/package-versions.mjs --check
           node scripts/package-versions.mjs --files
 
+      - name: Engine and native package suites
+        run: |
+          npm run test:engine
+          for name in testAirPlaySendsSpatialAudioBackToFLAC testDTSSyncPointsAcceptEveryCorePackingAndHDSubstreams testInputEndingBeforeASpatialSessionStartsFallsBack testAStagedSegmentFromBeforeResetCannotReplaceTheCurrentFile; do
+            grep -E "Test Case .*SpatialAudioTests[ .]$name.*passed" packages/tomo-engine/.build/test.log
+          done
+
       - name: Assemble tvOS project through Expo and CocoaPods
         run: |
           npx --no-install expo prebuild --clean --platform ios --no-install 2>&1 | tee "$RUNNER_TEMP/tomo-private/evidence/prebuild.log"
@@ -77,11 +84,26 @@ jobs:
           cp ios/Pods/Pods.xcodeproj/project.pbxproj "$RUNNER_TEMP/tomo-private/evidence/Pods.pbxproj"
           cp ios/TomoTV.xcodeproj/project.pbxproj "$RUNNER_TEMP/tomo-private/evidence/TomoTV.pbxproj"
           cp 'ios/Pods/Target Support Files/TomoEngine/TomoEngine.release.xcconfig' "$RUNNER_TEMP/tomo-private/evidence/TomoEngine.release.xcconfig"
-          grep -Fx 'BUILT_PRODUCTS_DIR = $(PODS_CONFIGURATION_BUILD_DIR)' "$RUNNER_TEMP/tomo-private/evidence/TomoEngine.release.xcconfig"
+          grep -Fx 'CONFIGURATION_BUILD_DIR = $(PODS_CONFIGURATION_BUILD_DIR)' "$RUNNER_TEMP/tomo-private/evidence/TomoEngine.release.xcconfig"
           mkdir -p ios/TomoTV.xcworkspace/xcshareddata/swiftpm
           cp packages/tomo-engine/Package.resolved ios/TomoTV.xcworkspace/xcshareddata/swiftpm/Package.resolved
+          mkdir -p ios/Pods/Pods.xcodeproj/project.xcworkspace/xcshareddata/swiftpm
+          cp packages/tomo-engine/Package.resolved ios/Pods/Pods.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
           git diff --exit-code "$CANDIDATE_SHA" -- . ':!.github/workflows/test-pr.yml'
           shasum -a 256 -c "$RUNNER_TEMP/tomo-private/evidence/npm-lock.sha256"
+
+      - name: Verify effective archive staging directory
+        run: |
+          xcodebuild -project ios/Pods/Pods.xcodeproj -target TomoEngine -configuration Release \
+            -sdk appletvos -showBuildSettings -json DEPLOYMENT_LOCATION=YES \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/tomo-source-packages" \
+            -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            > "$RUNNER_TEMP/tomo-private/evidence/engine-build-settings.json"
+          jq -e '[.[] | select(.target == "TomoEngine") | .buildSettings |
+            select(.BUILT_PRODUCTS_DIR == .PODS_CONFIGURATION_BUILD_DIR and
+                   .CONFIGURATION_BUILD_DIR == .PODS_CONFIGURATION_BUILD_DIR)] | length == 1' \
+            "$RUNNER_TEMP/tomo-private/evidence/engine-build-settings.json"
 
       - name: Archive unsigned tvOS Release app with bundled JavaScript
         run: |
@@ -132,7 +154,7 @@ jobs:
           git diff --exit-code "$CANDIDATE_SHA" -- . ':!.github/workflows/test-pr.yml'
           shasum -a 256 -c "$RUNNER_TEMP/tomo-private/evidence/npm-lock.sha256"
           cmp ios/Podfile.lock "$RUNNER_TEMP/tomo-private/evidence/Podfile.lock"
-          for lock in packages/tomo-engine/Package.resolved native/ios/Package.resolved ios/TomoTV.xcworkspace/xcshareddata/swiftpm/Package.resolved; do
+          for lock in packages/tomo-engine/Package.resolved native/ios/Package.resolved ios/TomoTV.xcworkspace/xcshareddata/swiftpm/Package.resolved ios/Pods/Pods.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved; do
             diff -u "$RUNNER_TEMP/tomo-private/evidence/expected-pins.json" <(jq -S '.pins' "$lock")
           done
 
@@ -140,6 +162,11 @@ jobs:
         if: always()
         run: |
           mkdir -p "$RUNNER_TEMP/tomo-private/evidence" "$RUNNER_TEMP/tomo-encrypted"
+          for package in packages/tomo-engine native/ios; do
+            if [ -f "$package/.build/test.log" ]; then
+              cp "$package/.build/test.log" "$RUNNER_TEMP/tomo-private/evidence/$(basename "$package")-test.log"
+            fi
+          done
           entries=(evidence)
           if [ -d "$RUNNER_TEMP/tomo-private/TomoTV.xcarchive" ]; then entries+=(TomoTV.xcarchive); fi
           COPYFILE_DISABLE=1 tar -czf "$RUNNER_TEMP/tomo-private.tar.gz" -C "$RUNNER_TEMP/tomo-private" "${entries[@]}"

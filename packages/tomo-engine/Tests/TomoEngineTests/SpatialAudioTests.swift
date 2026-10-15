@@ -297,8 +297,10 @@ final class SpatialAudioTests: XCTestCase {
         SpatialAudioOutput.externalPlayback(true, id: "player", item: item)
         XCTAssertNotNil(spatial.failure)
         XCTAssertFalse(SpatialAudio.eligible(atmos))
+        spatial.rememberRefusal(reopening: true)
         SpatialAudioOutput.externalPlayback(false, id: "player", item: nil)
         XCTAssertTrue(SpatialAudio.eligible(atmos))
+        XCTAssertFalse(SpatialAudio.takesRefusal("test#1"), "AirPlay must not leave a refusal for the next local playback")
     }
 
     /// TrueHD converts only with an Atmos presentation; DTS-HD MA is tried, since FFmpeg reads
