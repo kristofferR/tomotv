@@ -36,9 +36,9 @@ jobs:
           mkdir -p "$RUNNER_TEMP/tomo-private/evidence"
           git merge-base --is-ancestor "$CANDIDATE_SHA" HEAD
           git diff --exit-code "$CANDIDATE_SHA" HEAD -- . ':!.github/workflows/test-pr.yml'
-          test "$(xcodebuild -version | head -n 1)" = 'Xcode 26.6'
           git rev-parse HEAD > "$RUNNER_TEMP/tomo-private/evidence/workflow-sha.txt"
           xcodebuild -version > "$RUNNER_TEMP/tomo-private/evidence/xcode.txt"
+          grep -qx 'Xcode 26.6' "$RUNNER_TEMP/tomo-private/evidence/xcode.txt"
           shasum -a 256 package-lock.json > "$RUNNER_TEMP/tomo-private/evidence/npm-lock.sha256"
           jq -S '.pins' packages/tomo-engine/Package.resolved > "$RUNNER_TEMP/tomo-private/evidence/expected-pins.json"
           jq -e '.pins | length == 1 and .[0].identity == "spatialaudiobridge" and .[0].state.version == "1.6.2" and .[0].state.revision == "14275b11c510596c0f3a361e5da70cec109e99be"' packages/tomo-engine/Package.resolved
@@ -49,8 +49,8 @@ jobs:
           node-version: '20'
           cache: npm
 
-      - name: Install artifact encryption tool
-        run: brew install age
+      - name: Install archive preparation tools
+        run: brew install age ffmpeg
 
       - name: Install locked dependencies and frameworks
         run: |
