@@ -1,103 +1,133 @@
-name: Test PR
+name: Private unsigned tvOS archive
 
 on:
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-
+  archive:
+    if: github.repository == 'kristofferR/tomotv' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/ci/tvos-private-archive-6808319a'
+    runs-on: macos-26
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      CANDIDATE_SHA: 6808319a2ca7227437a705f2eda193bea6b7270f
+      ARTIFACT_RECIPIENT: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEafGHMwP9NUowbsjvz5a1Rb6hAyTAfGTqVaeGTUexTH
+      CI: '1'
+      EXPO_TV: '1'
+      EXPO_NO_TELEMETRY: '1'
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      FORCE_BUNDLING: '1'
     steps:
-      # Full history: the package version check diffs against the commit npm recorded per publish.
-      - name: Checkout code
+      - name: Checkout exact archive ref
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify candidate and toolchain
+        run: |
+          mkdir -p "$RUNNER_TEMP/tomo-private/evidence"
+          git merge-base --is-ancestor "$CANDIDATE_SHA" HEAD
+          git diff --exit-code "$CANDIDATE_SHA" HEAD -- . ':!.github/workflows/test-pr.yml'
+          test "$(xcodebuild -version | head -n 1)" = 'Xcode 26.6'
+          git rev-parse HEAD > "$RUNNER_TEMP/tomo-private/evidence/workflow-sha.txt"
+          xcodebuild -version > "$RUNNER_TEMP/tomo-private/evidence/xcode.txt"
+          shasum -a 256 package-lock.json > "$RUNNER_TEMP/tomo-private/evidence/npm-lock.sha256"
+          jq -S '.pins' packages/tomo-engine/Package.resolved > "$RUNNER_TEMP/tomo-private/evidence/expected-pins.json"
+          jq -e '.pins | length == 1 and .[0].identity == "spatialaudiobridge" and .[0].state.version == "1.6.2" and .[0].state.revision == "14275b11c510596c0f3a361e5da70cec109e99be"' packages/tomo-engine/Package.resolved
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
-          cache: "npm"
+          node-version: '20'
+          cache: npm
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Install artifact encryption tool
+        run: brew install age
 
-      # The repo's strongest property is that it compiles clean in strict mode
-      # with no `any` and no @ts-ignore. Nothing verified that until now, so the
-      # discipline was upheld by hand.
-      - name: Type check
-        run: npx tsc --noEmit
+      - name: Install locked dependencies and frameworks
+        run: |
+          npm ci 2>&1 | tee "$RUNNER_TEMP/tomo-private/evidence/npm-ci.log"
+          npm run fetch:ffmpeg 2>&1 | tee "$RUNNER_TEMP/tomo-private/evidence/ffmpeg.log"
+          pod --version | tee "$RUNNER_TEMP/tomo-private/evidence/cocoapods-version.txt"
+          git diff --exit-code "$CANDIDATE_SHA" -- . ':!.github/workflows/test-pr.yml'
+          shasum -a 256 -c "$RUNNER_TEMP/tomo-private/evidence/npm-lock.sha256"
 
-      # --coverage is what applies jest.config.js's coverageThreshold; a plain
-      # `jest` run measures nothing and the floor gates nothing.
-      - name: Run tests
-        run: npm run test:coverage
+      - name: Assemble tvOS project through Expo and CocoaPods
+        run: |
+          npx --no-install expo prebuild --clean --platform ios --no-install 2>&1 | tee "$RUNNER_TEMP/tomo-private/evidence/prebuild.log"
+          pod install --project-directory=ios 2>&1 | tee "$RUNNER_TEMP/tomo-private/evidence/pods.log"
+          test -f ios/TomoTV.xcworkspace/contents.xcworkspacedata
+          cmp native/ios/MultiAudioResourceLoader/RNVideoPlugin.swift ios/MultiAudioResourceLoader/RNVideoPlugin.swift
+          cp ios/Podfile.lock "$RUNNER_TEMP/tomo-private/evidence/Podfile.lock"
+          mkdir -p ios/TomoTV.xcworkspace/xcshareddata/swiftpm
+          cp packages/tomo-engine/Package.resolved ios/TomoTV.xcworkspace/xcshareddata/swiftpm/Package.resolved
+          git diff --exit-code "$CANDIDATE_SHA" -- . ':!.github/workflows/test-pr.yml'
+          shasum -a 256 -c "$RUNNER_TEMP/tomo-private/evidence/npm-lock.sha256"
 
-      # The same command the editor, the pre-commit hook and the CLI use.
-      # ESLint owns code, rules and formatting both (eslint-plugin-prettier);
-      # Prettier covers what ESLint does not lint, such as Markdown and JSON.
-      - name: Lint
-        run: npm run lint
+      - name: Archive unsigned tvOS Release app with bundled JavaScript
+        run: |
+          xcodebuild archive \
+            -workspace ios/TomoTV.xcworkspace -scheme TomoTV -configuration Release \
+            -sdk appletvos -destination 'generic/platform=tvOS' -jobs 2 \
+            -archivePath "$RUNNER_TEMP/tomo-private/TomoTV.xcarchive" \
+            -derivedDataPath "$RUNNER_TEMP/tomo-derived-data" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/tomo-source-packages" \
+            -resultBundlePath "$RUNNER_TEMP/tomo-private/evidence/Archive.xcresult" \
+            -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= DEVELOPMENT_TEAM= \
+            2>&1 | tee "$RUNNER_TEMP/tomo-private/evidence/archive.log"
 
-      # A dependency added without regenerating leaves the app shipping code it does
-      # not attribute, which is the one clear way to breach MIT and BSD.
-      #
-      # Regenerate and let git judge, rather than `licenses:check`: postinstall has
-      # already run --if-stale by this point, so the file on disk is current either
-      # way and a byte-compare would pass over a stale COMMIT. The full run (no
-      # --if-stale) also catches a generated file edited by hand.
-      # Dependabot edits only the lockfile and cannot regenerate the file; its
-      # merges are reconciled by licenses-regen.yml on main instead.
-      - name: Licenses are current
-        if: github.actor != 'dependabot[bot]'
-        run: npm run licenses && git diff --exit-code constants/bundled-licenses.ts
+      - name: Verify unsigned device app and bundled JavaScript
+        run: |
+          app="$RUNNER_TEMP/tomo-private/TomoTV.xcarchive/Products/Applications/TomoTV.app"
+          test -s "$app/main.jsbundle"
+          test -d "$app/PlugIns/TopShelf.appex"
+          test ! -e "$app/embedded.mobileprovision"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleSupportedPlatforms:0' "$app/Info.plist")" = AppleTVOS
+          test "$(lipo -archs "$app/TomoTV")" = arm64
+          if codesign -d "$app" > "$RUNNER_TEMP/tomo-private/evidence/signature.txt" 2>&1; then
+            echo 'Unexpected signed app'
+            exit 1
+          fi
+          file "$app/main.jsbundle" "$app/TomoTV" > "$RUNNER_TEMP/tomo-private/evidence/app-files.txt"
+          jq -n --arg candidate "$CANDIDATE_SHA" --arg workflow "$GITHUB_SHA" --arg run "$GITHUB_RUN_ID" \
+            '{candidate:$candidate,workflow:$workflow,run:$run,platform:"tvOS",architecture:"arm64",configuration:"Release",unsigned:true,bundledJavaScript:true}' \
+            > "$RUNNER_TEMP/tomo-private/evidence/verified-app.json"
 
-      # Merging to main publishes every package version npm lacks, so a package change has to
-      # carry a new version, and its tarball has to carry what Cocuyo will compile.
-      - name: Package versions and tarballs
-        run: node scripts/package-versions.mjs --check && node scripts/package-versions.mjs --files
+      - name: Verify source and dependency locks stayed fixed
+        run: |
+          git diff --exit-code "$CANDIDATE_SHA" -- . ':!.github/workflows/test-pr.yml'
+          shasum -a 256 -c "$RUNNER_TEMP/tomo-private/evidence/npm-lock.sha256"
+          cmp ios/Podfile.lock "$RUNNER_TEMP/tomo-private/evidence/Podfile.lock"
+          for lock in packages/tomo-engine/Package.resolved native/ios/Package.resolved ios/TomoTV.xcworkspace/xcshareddata/swiftpm/Package.resolved; do
+            diff -u "$RUNNER_TEMP/tomo-private/evidence/expected-pins.json" <(jq -S '.pins' "$lock")
+          done
 
-      # The playback suite itself needs a booted simulator, a built app and a Jellyfin
-      # carrying the fixture libraries, so it stays local and this is the half CI can
-      # hold: every item that records a baseline has one, and no baseline outlives its
-      # item. Mode and progress assertions are NOT covered here.
-      - name: Playback manifest and baselines agree
-        run: npm run test:playback:manifest
+      - name: Encrypt archive and evidence
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/tomo-private/evidence" "$RUNNER_TEMP/tomo-encrypted"
+          entries=(evidence)
+          if [ -d "$RUNNER_TEMP/tomo-private/TomoTV.xcarchive" ]; then entries+=(TomoTV.xcarchive); fi
+          COPYFILE_DISABLE=1 tar -czf "$RUNNER_TEMP/tomo-private.tar.gz" -C "$RUNNER_TEMP/tomo-private" "${entries[@]}"
+          age -r "$ARTIFACT_RECIPIENT" -o "$RUNNER_TEMP/tomo-encrypted/tomo-tvos-6808319a.tar.gz.age" "$RUNNER_TEMP/tomo-private.tar.gz"
+          cd "$RUNNER_TEMP/tomo-encrypted"
+          shasum -a 256 tomo-tvos-6808319a.tar.gz.age > SHA256SUMS
 
-      # The screenshot compositor's output goes to App Store Connect, where an image under
-      # the wrong caption is a listing error. jest cannot see .mjs, so assign() is gated the
-      # same way the manifest is: a node run that exits non-zero.
-      - name: Screenshot slots hold their own captions
-        run: npm run test:shots
-
-  # Both Swift packages are platforms: [.macOS(.v14)] and link the FFmpeg xcframeworks, which
-  # packages/tomo-engine/scripts/fetch-ffmpeg.js refuses to download off darwin. The engine
-  # cannot ride the ubuntu job.
-  engine:
-    runs-on: macos-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Preserve encrypted private artifact
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          node-version: "20"
-          cache: "npm"
-
-      # postinstall fetches and checksums the xcframeworks the package links against.
-      - name: Install dependencies
-        run: npm ci
-
-      # The codec matrices generate their fixtures with a host ffmpeg and XCTSkip without one.
-      # Installing it un-skips every codec whose encoder ffmpeg carries, on top of the
-      # Dolby Vision conversion, master playlist and segment-grid tests.
-      - name: Install ffmpeg
-        run: brew install ffmpeg
-
-      - name: Engine tests
-        run: npm run test:engine
+          name: tomo-tvos-6808319a-private-encrypted
+          path: ${{ runner.temp }}/tomo-encrypted/
+          if-no-files-found: error
+          retention-days: 90
