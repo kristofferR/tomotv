@@ -17,7 +17,7 @@ jobs:
         shell: bash
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
-      CANDIDATE_SHA: 86c1bd9f1e436f2b7f4b7e3871d428483e8cf220
+      CANDIDATE_SHA: dbde246e8978e79364926cf5abd8bbf0bb43acbb
       ARTIFACT_RECIPIENT: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEafGHMwP9NUowbsjvz5a1Rb6hAyTAfGTqVaeGTUexTH
       CI: '1'
       EXPO_TV: '1'
@@ -86,18 +86,7 @@ jobs:
           npm test -- --runInBand packages/tomo-engine/__tests__/app.plugin.test.js 2>&1 | tee "$RUNNER_TEMP/tomo-private/evidence/plugin-tests.log"
           npx --no-install eslint packages/tomo-engine/app.plugin.js packages/tomo-engine/__tests__/app.plugin.test.js
           npx --no-install prettier --check packages/tomo-engine/app.plugin.js packages/tomo-engine/__tests__/app.plugin.test.js packages/tomo-engine/package.json
-          ruby <<'RUBY' > "$RUNNER_TEMP/tomo-private/evidence/cocoapods-model.txt"
-          require 'cocoapods'
-          require_relative 'packages/tomo-engine/ios/spm-build-directory'
-          ['TomoEngine', 'Other'].each do |name|
-            target = Pod::PodTarget.allocate
-            target.define_singleton_method(:pod_name) { name }
-            target.define_singleton_method(:label) { name }
-            expected = name == 'TomoEngine' ? 'shared path' : 'shared path/Other'
-            abort "Wrong build path for #{name}" unless target.configuration_build_dir('shared path') == expected
-            puts "#{name}: #{target.configuration_build_dir('shared path')}"
-          end
-          RUBY
+          ruby packages/tomo-engine/__tests__/spm-build-directory.test.rb 2>&1 | tee "$RUNNER_TEMP/tomo-private/evidence/cocoapods-model.txt"
 
       - name: Assemble tvOS project through Expo and CocoaPods
         run: |
