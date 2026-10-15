@@ -13,7 +13,7 @@ jobs:
     timeout-minutes: 45
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
-      CANDIDATE_SHA: fd7698ed94fdd85a5d0719803f5910ee59c26976
+      CANDIDATE_SHA: 6808319a2ca7227437a705f2eda193bea6b7270f
     steps:
       - name: Checkout exact validation ref
         uses: actions/checkout@v4
