@@ -5,6 +5,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   archive:
@@ -67,12 +68,16 @@ jobs:
           node scripts/package-versions.mjs --check
           node scripts/package-versions.mjs --files
 
-      - name: Engine and native package suites
+      - name: Verify passed suites for this exact source candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          npm run test:engine
-          for name in testAirPlaySendsSpatialAudioBackToFLAC testDTSSyncPointsAcceptEveryCorePackingAndHDSubstreams testInputEndingBeforeASpatialSessionStartsFallsBack testAStagedSegmentFromBeforeResetCannotReplaceTheCurrentFile; do
-            grep -E "Test Case .*SpatialAudioTests[ .]$name.*passed" packages/tomo-engine/.build/test.log
-          done
+          tested_workflow=4f069777777ced1d1eeb5825c24b552890ae6d26
+          git diff --exit-code "$CANDIDATE_SHA" "$tested_workflow" -- . ':!.github/workflows/test-pr.yml'
+          gh api repos/kristofferR/tomotv/actions/runs/38805902651 > "$RUNNER_TEMP/tomo-private/evidence/test-run.json"
+          jq -e --arg head "$tested_workflow" '.head_sha == $head and .status == "completed"' "$RUNNER_TEMP/tomo-private/evidence/test-run.json"
+          gh api repos/kristofferR/tomotv/actions/jobs/116666558086 > "$RUNNER_TEMP/tomo-private/evidence/test-job.json"
+          jq -e '.run_id == 38805902651 and any(.steps[]; .name == "Engine and native package suites" and .conclusion == "success")' "$RUNNER_TEMP/tomo-private/evidence/test-job.json"
 
       - name: Assemble tvOS project through Expo and CocoaPods
         run: |
@@ -94,8 +99,9 @@ jobs:
 
       - name: Verify effective archive staging directory
         run: |
-          xcodebuild -project ios/Pods/Pods.xcodeproj -target TomoEngine -configuration Release \
+          xcodebuild -project ios/Pods/Pods.xcodeproj -scheme TomoEngine -configuration Release \
             -sdk appletvos -showBuildSettings -json DEPLOYMENT_LOCATION=YES \
+            -derivedDataPath "$RUNNER_TEMP/tomo-pod-settings" \
             -clonedSourcePackagesDirPath "$RUNNER_TEMP/tomo-source-packages" \
             -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
