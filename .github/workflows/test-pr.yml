@@ -70,7 +70,7 @@ jobs:
       - name: Confirm the three focused regressions ran
         run: |
           for name in testDTSSyncPointsAcceptEveryCorePackingAndHDSubstreams testInputEndingBeforeASpatialSessionStartsFallsBack testAStagedSegmentFromBeforeResetCannotReplaceTheCurrentFile; do
-            grep -E "Test Case .*SpatialAudioTests\.$name.*passed" packages/tomo-engine/.build/test.log
+            grep -E "Test Case .*SpatialAudioTests[ .]$name.*passed" packages/tomo-engine/.build/test.log
           done
 
       - name: Compile engine for Apple TV
