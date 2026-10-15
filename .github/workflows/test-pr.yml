@@ -97,19 +97,26 @@ jobs:
           git diff --exit-code "$CANDIDATE_SHA" -- . ':!.github/workflows/test-pr.yml'
           shasum -a 256 -c "$RUNNER_TEMP/tomo-private/evidence/npm-lock.sha256"
 
-      - name: Verify effective archive staging directory
+      - name: Assert staging in the app archive build graph
         run: |
-          xcodebuild -project ios/Pods/Pods.xcodeproj -scheme TomoEngine -configuration Release \
-            -sdk appletvos -showBuildSettings -json DEPLOYMENT_LOCATION=YES \
-            -derivedDataPath "$RUNNER_TEMP/tomo-pod-settings" \
-            -clonedSourcePackagesDirPath "$RUNNER_TEMP/tomo-source-packages" \
-            -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
-            > "$RUNNER_TEMP/tomo-private/evidence/engine-build-settings.json"
-          jq -e '[.[] | select(.target == "TomoEngine") | .buildSettings |
-            select(.BUILT_PRODUCTS_DIR == .PODS_CONFIGURATION_BUILD_DIR and
-                   .CONFIGURATION_BUILD_DIR == .PODS_CONFIGURATION_BUILD_DIR)] | length == 1' \
-            "$RUNNER_TEMP/tomo-private/evidence/engine-build-settings.json"
+          ruby <<'RUBY'
+          require 'xcodeproj'
+          project = Xcodeproj::Project.open('ios/Pods/Pods.xcodeproj')
+          target = project.targets.find { |candidate| candidate.name == 'TomoEngine' }
+          abort 'Missing TomoEngine target' unless target
+          phase = target.new_shell_script_build_phase('Verify shared SpatialAudioCore staging')
+          phase.output_paths = [File.join(ENV.fetch('RUNNER_TEMP'), 'tomo-private/evidence/engine-staging.txt')]
+          phase.shell_script = <<~SH
+            set -eu
+            printf '%s\\n' "$CONFIGURATION_BUILD_DIR" "$BUILT_PRODUCTS_DIR" "$PODS_CONFIGURATION_BUILD_DIR" > "$SCRIPT_OUTPUT_FILE_0"
+            test "$CONFIGURATION_BUILD_DIR" = "$PODS_CONFIGURATION_BUILD_DIR"
+            test "$BUILT_PRODUCTS_DIR" = "$PODS_CONFIGURATION_BUILD_DIR"
+          SH
+          target.build_phases.delete(phase)
+          target.build_phases.unshift(phase)
+          project.save
+          RUBY
+          cp ios/Pods/Pods.xcodeproj/project.pbxproj "$RUNNER_TEMP/tomo-private/evidence/Pods.validation.pbxproj"
 
       - name: Archive unsigned tvOS Release app with bundled JavaScript
         run: |
@@ -146,6 +153,7 @@ jobs:
             fi
           done
           archive="$RUNNER_TEMP/tomo-private/TomoTV.xcarchive"
+          test -s "$RUNNER_TEMP/tomo-private/evidence/engine-staging.txt"
           find "$archive/Signatures" -name 'SpatialAudioCore.xcframework-tvos.signature' > "$RUNNER_TEMP/tomo-private/evidence/core-signatures.txt"
           test "$(wc -l < "$RUNNER_TEMP/tomo-private/evidence/core-signatures.txt" | tr -d ' ')" = 1
           test -s "$archive/Signatures/SpatialAudioCore.xcframework-tvos.signature"
