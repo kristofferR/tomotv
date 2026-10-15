@@ -8,3 +8,15 @@ module TomoEngineSPMBuildDirectory
 end
 
 Pod::PodTarget.prepend(TomoEngineSPMBuildDirectory)
+
+# CocoaPods hardcodes the Swift module-map import path instead of using the target's directory.
+module TomoEngineSPMModuleMap
+  def module_map_file_to_import
+    original = super
+    return original unless target.pod_name == 'TomoEngine' && target.uses_swift? && original
+
+    "#{target.configuration_build_dir}/#{target.product_module_name}.modulemap"
+  end
+end
+
+Pod::Target::BuildSettings::PodTargetSettings.prepend(TomoEngineSPMModuleMap)
