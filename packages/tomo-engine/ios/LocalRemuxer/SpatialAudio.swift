@@ -25,7 +25,7 @@ final class SpatialAudio {
     static let bitRate = 3_072_000
     /// A restart for a segment seeks this much before it: audio sits near, not at, the video keyframe.
     static let seekLead = 1.0
-    /// Audio a session takes without an error before the master may name APAC.
+    /// Audio a session takes without an error before the master may name APAC, and the probe decodes.
     static let verdictSeconds = 1.0
     /// Chunks handed to the transcoder at once, about 0.2 s each; the read loop waits past them.
     static let queuedChunks = 16
@@ -66,11 +66,15 @@ final class SpatialAudio {
     private let slots = DispatchSemaphore(value: SpatialAudio.queuedChunks)
     private var chunk = Data()
     private var chunkStart: Double?
+    /// Chunks from the session's sync point, held until the probe has a second of them.
+    private var held: [(data: Data, start: Double?)]?
 
     private static let refusedLock = NSLock()
     /// Tracks this process carries as FLAC, and how many next sessions do: each replaces one that failed on them.
     private static var refused: Set<String> = []
     private static var refusedNext: [String: Int] = [:]
+    /// Tracks a probe found renderable this process: later sessions on them skip the probe.
+    private static var renderable: Set<String> = []
 
     /// The track stays FLAC for the process, or for this one replacement session, which spends the refusal.
     static func takesRefusal(_ key: String) -> Bool {
@@ -83,7 +87,7 @@ final class SpatialAudio {
     }
 
     /// TrueHD with an Atmos presentation, or DTS-HD MA, whose DTS:X FFmpeg cannot tell from plain
-    /// (the library refuses plain as decoding starts), at 48 kHz on systems 26 and later, not over AirPlay.
+    /// (the probe refuses plain), at 48 kHz on systems 26 and later, not over AirPlay.
     static func eligible(_ parameters: AVCodecParameters) -> Bool {
         guard #available(macOS 26, iOS 26, tvOS 26, *), parameters.sample_rate == 48_000, !SpatialAudioOutput.externalPlayback else { return false }
         switch parameters.codec_id {
@@ -117,8 +121,8 @@ final class SpatialAudio {
     static func disposition(of error: Error) -> Disposition {
         guard #available(macOS 26, iOS 26, tvOS 26, *), let error = error as? SpatialAudioError else { return .refuse }
         switch error {
-        case .decoding, .invalidConfiguration: return .remember
-        case .source: return .newSession
+        case .unsupported, .invalidConfiguration: return .remember
+        case .discontinuity: return .newSession
         default: return .refuse
         }
     }
@@ -128,10 +132,11 @@ final class SpatialAudio {
         converting > 0 && produced > segment && produced - converting <= segment
     }
 
-    static func forgetRefusals() {
+    static func forgetTracks() {
         refusedLock.withLock {
             refused.removeAll()
             refusedNext.removeAll()
+            renderable.removeAll()
         }
     }
 
@@ -221,6 +226,9 @@ final class SpatialAudio {
             guard lock.withLock({ refusal == nil }), let time, isSyncPoint(bytes) else { return }
             begin(at: time)
             guard session != nil else { return }
+        } else if held != nil, let time, time - inputStart >= Self.verdictSeconds {
+            send()
+            probeHeld()
         }
         // About 0.2 s per append: the library judges the step between append times as a gap or not.
         if let start = chunkStart, let time, time - start >= 0.2 || time < start {
@@ -247,6 +255,7 @@ final class SpatialAudio {
         }
         if jumpedAtEnd { NSLog("[LocalRemuxer] spatial %@ refused: the timestamps jumped at the end of the input", prefix) }
         send()
+        probeHeld()
         let end = CMTime(value: totalFrames, timescale: CMTimeScale(Self.sampleRate))
         enqueue { _ = try await transcoder.finish(paddingTo: end) }
         session = nil
@@ -275,6 +284,9 @@ final class SpatialAudio {
     @available(macOS 26, iOS 26, tvOS 26, *)
     private var transcoder: SpatialAudioTranscoder? { session as? SpatialAudioTranscoder }
 
+    @available(macOS 26, iOS 26, tvOS 26, *)
+    private var codec: SpatialAudioCodec { trueHD ? .trueHDAtmos : .dtsX }
+
     func isSyncPoint(_ bytes: Data) -> Bool {
         // TrueHD major sync, or DTS core (16/14-bit, either endian) or DTS-HD substream sync.
         let head = [UInt8](bytes.prefix(8))
@@ -300,10 +312,11 @@ final class SpatialAudio {
             return self.generation
         }
         do {
-            session = try SpatialAudioTranscoder(codec: trueHD ? .trueHDAtmos : .dtsX, destination: .segments(onSegment: { [weak self] segment in
+            session = try SpatialAudioTranscoder(codec: codec, destination: .segments(onSegment: { [weak self] segment in
                 self?.deliver(segment, generation: generation)
             }), configuration: configuration)
             inputStart = time
+            held = Self.refusedLock.withLock { Self.renderable.contains(refusalKey) } ? nil : []
             NSLog("[LocalRemuxer] spatial %@: session from seg%d at %.3fs", prefix, index, time)
         } catch {
             refuse(error, generation: generation)
@@ -315,12 +328,42 @@ final class SpatialAudio {
         let (data, start) = (chunk, chunkStart)
         chunk = Data()
         chunkStart = nil
+        if held != nil {
+            held?.append((data, start))
+            return
+        }
+        append(data, start: start, to: transcoder)
+    }
+
+    @available(macOS 26, iOS 26, tvOS 26, *)
+    private func append(_ data: Data, start: Double?, to transcoder: SpatialAudioTranscoder) {
         let reached = start.map { $0 - inputStart >= Self.verdictSeconds } ?? false
         let generation = lock.withLock { self.generation }
         enqueue {
             try await transcoder.append(data, time: start.map { CMTime(seconds: $0, preferredTimescale: 48_000) })
             if reached { self.lock.withLock { if self.generation == generation { self.accepted = true } } }
         }
+    }
+
+    /// Decodes the held audio before the session takes it, so a track the library will never render
+    /// never reaches the encoder. An undetermined probe leaves the verdict to the session.
+    private func probeHeld() {
+        guard #available(macOS 26, iOS 26, tvOS 26, *), let transcoder = transcoder, let chunks = held else { return }
+        held = nil
+        let (codec, key, data) = (codec, refusalKey, chunks.reduce(into: Data()) { $0.append($1.data) })
+        enqueue {
+            do {
+                switch try codec.probe(data) {
+                case .renderable: _ = Self.refusedLock.withLock { Self.renderable.insert(key) }
+                case .unsupported(let reason): throw SpatialAudioError.unsupported(reason)
+                case .undetermined: break
+                }
+            } catch {
+                await transcoder.cancel()
+                throw error
+            }
+        }
+        for chunk in chunks { append(chunk.data, start: chunk.start, to: transcoder) }
     }
 
     /// Runs `work` after everything queued before it; the read loop waits while the queue is full.
@@ -344,6 +387,7 @@ final class SpatialAudio {
         session = nil
         chunk = Data()
         chunkStart = nil
+        held = nil
     }
 
     private func refuse(_ error: Error, generation: Int) {

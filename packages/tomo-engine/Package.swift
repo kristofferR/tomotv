@@ -24,7 +24,7 @@ let package = Package(
     ],
     // TrueHD Atmos and DTS:X to APAC; ios/TomoEngine.podspec declares the same package for the app.
     dependencies: [
-        .package(url: "https://github.com/kristofferR/SpatialAudioBridge", from: "1.6.2"),
+        .package(url: "https://github.com/kristofferR/SpatialAudioBridge", from: "2.0.0"),
     ],
     targets: [
         // XMLTV on libxml2 SAX and zlib, M3U playlists. No UIKit outside the bridge.
