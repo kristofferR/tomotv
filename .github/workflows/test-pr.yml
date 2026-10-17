@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 env:
-  CANDIDATE_SHA: 25c39f8211e1d22181cce3f63a9e4dbc580ae9fa
+  CANDIDATE_SHA: 898f24ac77c752ed85c945fbdca9d20c3c0d1491
 
 jobs:
   test:
@@ -133,11 +133,15 @@ jobs:
 
       - run: npm ci
 
+      - name: CocoaPods helper tests
+        run: ruby packages/tomo-engine/__tests__/spm-build-directory.test.rb
+
       - name: Assemble tvOS project through Expo and CocoaPods
         run: |
           mkdir -p "$RUNNER_TEMP/tomo-private/evidence"
           npx --no-install expo prebuild --clean --platform ios --no-install
           pod install --project-directory=ios
+          grep -n "SpatialAudioCore" "ios/Pods/Target Support Files/Pods-TomoTV/Pods-TomoTV-frameworks.sh"
           for dir in ios/TomoTV.xcworkspace/xcshareddata/swiftpm ios/Pods/Pods.xcodeproj/project.xcworkspace/xcshareddata/swiftpm; do
             mkdir -p "$dir"
             cp packages/tomo-engine/Package.resolved "$dir/Package.resolved"
