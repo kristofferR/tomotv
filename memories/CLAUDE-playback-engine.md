@@ -288,14 +288,15 @@ MPEG-TS segments and AVPlayer refuses an fMP4 with an `.mp3` sample entry.
 **TrueHD Atmos and DTS:X become APAC** on systems 26 and later (`SpatialAudio.swift`,
 SpatialAudioBridge), since FLAC keeps only the 7.1 bed. Only the preferred track (position 0)
 converts: TrueHD when FFmpeg's profile reads Atmos, and any 48 kHz DTS-HD MA, because FFmpeg reads
-alternate DTS:X as plain; the library refuses plain DTS-HD MA as decoding starts. That track takes
+alternate DTS:X as plain. A session's first second is decoded by `SpatialAudioCodec.probe(_:)` before
+the encoder sees it, once per track per process, so plain DTS-HD MA is refused there. That track takes
 an audio-only rendition on its own 3.2 s grid whether or not it converts, every read generation
 opens one transcoder session on that grid, and a spatial segment the running session will not
 reach restarts the read at the video segment before it. The master waits, within its budget, for
 the session to take a second of audio: a refusal before that rebuilds the rendition as FLAC; after
 it the session fails with `spatialAudio` and the app reopens the engine at the playhead. The
-process remembers content refusals (`.decoding`, `.invalidConfiguration`) and a conversion slower
-than realtime, which goes back to FLAC before any engine verdict; a timestamp jump starts a new
+process remembers content refusals (`.unsupported`, `.invalidConfiguration`) and a conversion slower
+than realtime, which goes back to FLAC before any engine verdict; a `.discontinuity` starts a new
 session at the segment it interrupted, and one in the last packets costs the track for that
 session. `SpatialAudioOutput` attaches the library's `AtmosOutputActivator` to react-native-video's
 player through its plugin API, on iOS outside AirPlay, which sends the track back to FLAC.
