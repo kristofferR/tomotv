@@ -33,4 +33,16 @@ class SPMBuildDirectoryTest < Minitest::Test
   def test_frameworks_keep_automatic_module_map_discovery
     assert_nil module_map(target('TomoEngine', framework: true))
   end
+
+  def test_the_app_embeds_the_spatial_audio_core_once
+    core = Pod::Xcode::FrameworkPaths.new('${BUILT_PRODUCTS_DIR}/SpatialAudioCore.framework')
+    engine = target('TomoEngine')
+    engine.instance_variable_set(:@framework_paths, { 'TomoEngine' => [core], 'TomoEngine/Tests' => [] })
+    assert_equal({ 'TomoEngine' => [core], 'TomoEngine/Tests' => [] }, engine.framework_paths)
+    engine.instance_variable_set(:@framework_paths, {})
+    assert_equal({ 'TomoEngine' => [core] }, engine.framework_paths)
+    other = target('Other')
+    other.instance_variable_set(:@framework_paths, {})
+    assert_equal({}, other.framework_paths)
+  end
 end

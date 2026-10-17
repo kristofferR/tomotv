@@ -20,3 +20,17 @@ module TomoEngineSPMModuleMap
 end
 
 Pod::Target::BuildSettings::PodTargetSettings.prepend(TomoEngineSPMModuleMap)
+
+# Xcode stages the dynamic SpatialAudioCore.framework beside the static TomoEngine pod and embeds
+# it nowhere: CocoaPods' embed phase copies and signs it into the app.
+module TomoEngineSpatialAudioCore
+  def framework_paths
+    paths = super
+    return paths unless pod_name == 'TomoEngine'
+
+    core = Pod::Xcode::FrameworkPaths.new('${BUILT_PRODUCTS_DIR}/SpatialAudioCore.framework')
+    paths.merge(pod_name => (paths[pod_name] || []) | [core])
+  end
+end
+
+Pod::PodTarget.prepend(TomoEngineSpatialAudioCore)
