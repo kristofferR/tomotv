@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 env:
-  CANDIDATE_SHA: 93e3bf24eca6acd5e24e68f02f4a65e1476e442b
+  CANDIDATE_SHA: 25c39f8211e1d22181cce3f63a9e4dbc580ae9fa
 
 jobs:
   test:
