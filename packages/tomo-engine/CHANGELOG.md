@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.0
+
+- SpatialAudioBridge 2.0.0, whose core is the dynamic `SpatialAudioCore.framework` the app embeds.
+- A spatial session's first second is decoded by `SpatialAudioCodec.probe(_:)` before the encoder sees it, once per track per process: a track the library will never render, such as plain TrueHD or DTS-HD MA without DTS:X, goes back to FLAC without an encoder.
+- The process remembers `.unsupported` and `.invalidConfiguration` refusals; `.decoding` costs only the session. A `.discontinuity`, a timestamp jump or a decoded format change, starts a new session at the segment it interrupted.
+
 ## 1.1.0
 
 - On tvOS, iOS and macOS 26 and later the preferred audio track, when it is TrueHD with an Atmos presentation or DTS-HD MA carrying DTS:X, becomes APAC 7.1.4 through SpatialAudioBridge 1.6, on an audio-only rendition with its own 3.2 s grid. The library refuses plain DTS-HD MA as decoding starts and the track plays as FLAC; content refusals and a conversion slower than realtime are remembered for the process, before any engine verdict. A timestamp jump starts a new session at the segment it interrupted, padded with silence; one in the last packets sends the track to FLAC.
