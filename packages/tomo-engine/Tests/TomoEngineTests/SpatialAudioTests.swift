@@ -12,7 +12,7 @@ import XCTest
 final class SpatialAudioTests: XCTestCase {
     override func setUp() {
         super.setUp()
-        SpatialAudio.forgetRefusals()
+        SpatialAudio.forgetTracks()
     }
 
     private static let ffmpeg: String = {
@@ -321,13 +321,15 @@ final class SpatialAudioTests: XCTestCase {
         XCTAssertFalse(SpatialAudio.eligible(parameters(AV_CODEC_ID_TRUEHD, AV_PROFILE_TRUEHD_ATMOS, 96_000)))
     }
 
-    /// Only content the library cannot convert is held against the track for the process; a
-    /// timestamp jump starts a new session, and any other error costs this session alone.
+    /// Only content the library will never render is held against the track for the process; a
+    /// discontinuity starts a new session, and any other error costs this session alone.
     func testOnlyContentRefusalsAreRemembered() throws {
         guard #available(macOS 26, *) else { throw XCTSkip("SpatialAudioBridge needs macOS 26") }
-        XCTAssertEqual(SpatialAudio.disposition(of: SpatialAudioError.decoding("no Atmos presentation")), .remember)
+        XCTAssertEqual(SpatialAudio.disposition(of: SpatialAudioError.unsupported("no Atmos presentation")), .remember)
         XCTAssertEqual(SpatialAudio.disposition(of: SpatialAudioError.invalidConfiguration("layout")), .remember)
-        XCTAssertEqual(SpatialAudio.disposition(of: SpatialAudioError.source("The audio timestamps jump")), .newSession)
+        XCTAssertEqual(SpatialAudio.disposition(of: SpatialAudioError.discontinuity("The audio timestamps jump")), .newSession)
+        XCTAssertEqual(SpatialAudio.disposition(of: SpatialAudioError.decoding("truncated")), .refuse)
+        XCTAssertEqual(SpatialAudio.disposition(of: SpatialAudioError.source("range ignored")), .refuse)
         XCTAssertEqual(SpatialAudio.disposition(of: SpatialAudioError.encoding("encoder")), .refuse)
         XCTAssertEqual(SpatialAudio.disposition(of: URLError(.timedOut)), .refuse)
     }
@@ -718,6 +720,28 @@ final class SpatialAudioTests: XCTestCase {
                                  "-c:a", "copy", "-shortest"],
                                 output: try derived(from: path, "with-video"))
         try assertRefusedOntoTheTranscoder(source.path)
+    }
+
+    /// Fed to a converter anyway, plain TrueHD and DTS core are refused by the probe before any
+    /// segment, and the refusal holds for the process.
+    func testTheProbeRefusesATrackThatNeverRendersForTheProcess() throws {
+        guard #available(macOS 26, *) else { throw XCTSkip("SpatialAudioBridge needs macOS 26") }
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        for (encoder, trueHD) in [("truehd", true), ("dca", false)] {
+            let source = try plainFixture(encoder, ["-strict", "-2", "-ac", "2"])
+            let spatial = SpatialAudio(prefix: encoder, streamIndex: 1, trueHD: trueHD, priming: try APACConfiguration().encoderPrimingDuration().value,
+                                       totalFrames: 3 * 48_000, dir: dir, refusalKey: "\(encoder)#1")
+            defer { spatial.stop() }
+            spatial.open(atSessionStart: true)
+            try feed(spatial, from: source.path)
+            XCTAssertTrue(spin(seconds: 10) { spatial.failure != nil }, "\(encoder) passed the probe")
+            spatial.rememberRefusal(reopening: false)
+            XCTAssertTrue(SpatialAudio.takesRefusal("\(encoder)#1"))
+            XCTAssertTrue(SpatialAudio.takesRefusal("\(encoder)#1"), "\(encoder) was refused for one session only")
+            XCTAssertFalse(spatial.has(0))
+        }
     }
 
     /// DTS without its lossless extension never carries DTS:X: it takes the transcoder untried.
