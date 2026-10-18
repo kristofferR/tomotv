@@ -543,6 +543,15 @@ extension RemuxSession {
         }
     }
 
+    /// Whether a waiting spatial segment restarts the read now. It yields to a restart already queued and,
+    /// within the window ahead of the read, to requests the read reaches on its way, as a burst of skips leaves.
+    static func spatialRestarts(videoSegment: Int, producing: Int, stranded: Bool, waiting: [Int], seekQueued: Bool, window: Int) -> Bool {
+        guard !seekQueued else { return false }
+        if stranded { return true }
+        guard videoSegment > producing + seekAheadSegments else { return false }
+        return videoSegment - producing > window || !waiting.contains { $0 >= producing && $0 < videoSegment }
+    }
+
     /// Waits for a spatial segment. Production is counted on the video grid, so a segment the
     /// running session will not reach restarts the read at the video segment before its audio.
     func spatialSegmentURL(_ index: Int, _ spatial: SpatialAudio, request: SegmentRequest?) -> URL? {
@@ -574,6 +583,8 @@ extension RemuxSession {
             // A scrub leaves requests the player stopped waiting on; they must not drag the read.
             let newest = spatialWaiters == ticket
             let nearPlayhead = abs(videoSegment - lastRequestedSegment) <= aheadWindow
+            let seekQueued = pendingSeekSegment != nil || activationSeekSegment != nil
+            let waiting = Array(activeWaiters.keys)
             stateLock.unlock()
             guard let live else { return nil }
             if live.has(index) { return FileManager.default.fileExists(atPath: file.path) ? file : nil }
@@ -581,8 +592,9 @@ extension RemuxSession {
             // A session opening after a restart is waited for before it is judged again, and only near
             // the playhead, as a video waiter re-asserts.
             let stranded = live.covers(index).map { !$0 } ?? false
-            let ahead = videoSegment > producing + Self.seekAheadSegments
-            if newest && (stranded || ahead) && (!restarted || (waitedSinceRestart >= 20 && nearPlayhead)) {
+            let restarts = Self.spatialRestarts(videoSegment: videoSegment, producing: producing, stranded: stranded,
+                                                waiting: waiting, seekQueued: seekQueued, window: aheadWindow)
+            if newest && restarts && (!restarted || (waitedSinceRestart >= 20 && nearPlayhead)) {
                 stateLock.lock()
                 pendingSpatialSeek = target
                 playerBufferFilled = false

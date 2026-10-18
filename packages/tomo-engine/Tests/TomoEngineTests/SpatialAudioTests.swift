@@ -193,6 +193,21 @@ final class SpatialAudioTests: XCTestCase {
         XCTAssertNil(seek(nil, 12, 50), "a leftover spatial seek after a video request served from disk")
     }
 
+    /// After a burst of skips (measured on Apple TV: 147 to 152 and back for 20 s), a spatial segment ahead
+    /// of the read waits for the video requests the read reaches on its way instead of jumping over them.
+    func testASpatialSegmentAheadYieldsToVideoRequestsOnTheWay() {
+        let restarts = { (video: Int, producing: Int, stranded: Bool, waiting: [Int], queued: Bool) in
+            RemuxSession.spatialRestarts(videoSegment: video, producing: producing, stranded: stranded, waiting: waiting, seekQueued: queued, window: 20)
+        }
+        XCTAssertTrue(restarts(152, 140, false, [152], false), "nothing waits on the way")
+        XCTAssertFalse(restarts(152, 147, false, [148, 150, 152], false), "the read reaches the burst's requests first")
+        XCTAssertFalse(restarts(152, 147, false, [152], true), "a restart is already queued")
+        XCTAssertFalse(restarts(152, 151, false, [152], false), "the read is about to reach it")
+        XCTAssertTrue(restarts(152, 100, false, [120, 152], false), "too far ahead to wait for the read")
+        XCTAssertTrue(restarts(152, 152, true, [152], false), "the running session will not reach it")
+        XCTAssertFalse(restarts(152, 152, true, [152], true), "stranded, behind a queued restart")
+    }
+
     /// A spatial rendition is never measured: the master counts the APAC rate for it when the source
     /// declares less.
     func testTheMasterCountsTheAPACRateForASpatialRendition() throws {
