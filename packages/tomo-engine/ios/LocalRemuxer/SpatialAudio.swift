@@ -260,14 +260,14 @@ final class SpatialAudio {
 
     /// Drops segments outside `seconds`, the time span the session keeps.
     func prune(outside seconds: ClosedRange<Double>) {
-        let doomed: [Int] = lock.withLock {
+        // Under the lock install publishes with: a segment republished meanwhile keeps its file.
+        lock.withLock {
             let outside = completed.filter {
                 Self.startSeconds($0) + Self.startSeconds(1) < seconds.lowerBound || Self.startSeconds($0) > seconds.upperBound
             }
             completed.subtract(outside)
-            return Array(outside)
+            for index in outside { try? FileManager.default.removeItem(at: dir.appendingPathComponent(segmentName(index))) }
         }
-        for index in doomed { try? FileManager.default.removeItem(at: dir.appendingPathComponent(segmentName(index))) }
     }
 
     // MARK: - Sessions
