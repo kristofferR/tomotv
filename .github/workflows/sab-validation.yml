@@ -1,0 +1,205 @@
+name: SpatialAudioBridge 2.0 validation
+
+on:
+  push:
+    branches: ["validation/**"]
+
+permissions:
+  contents: read
+
+env:
+  CANDIDATE_SHA: a076530e3741fdea1cf6c6c260529eae20da77d5
+
+jobs:
+  test:
+    if: github.repository == 'kristofferR/tomotv'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify source candidate
+        run: |
+          git merge-base --is-ancestor "$CANDIDATE_SHA" HEAD
+          git diff --exit-code "$CANDIDATE_SHA" HEAD -- . ':!.github/workflows/sab-validation.yml'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Tests with the coverage floor
+        run: npm run test:coverage
+
+      - name: Lint
+        run: |
+          npm run lint
+          git diff --exit-code
+
+      - name: Licenses are current
+        run: npm run licenses && git diff --exit-code constants/bundled-licenses.ts
+
+      - name: Package versions and tarballs
+        run: node scripts/package-versions.mjs --check && node scripts/package-versions.mjs --files
+
+      - name: Playback manifest and baselines agree
+        run: npm run test:playback:manifest
+
+      - name: Screenshot slots hold their own captions
+        run: npm run test:shots
+
+      - name: HarfBuzz for the captures test
+        run: sudo apt-get update && sudo apt-get install -y libharfbuzz-bin
+
+      - name: Release platforms, captures, and Xcode setup
+        run: npm run test:release
+
+  engine:
+    if: github.repository == 'kristofferR/tomotv'
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Synthetic-fixture encoder
+        run: brew install ffmpeg
+
+      - name: Engine and native package suites
+        run: npm run test:engine
+
+      - name: The pins resolved to SpatialAudioBridge 2.0.0 and stayed put
+        run: |
+          for lock in packages/tomo-engine/Package.resolved native/ios/Package.resolved; do
+            jq -e '.pins | length == 1 and .[0].state.version == "2.0.0" and .[0].state.revision == "61ed9b602b0736954d34288aa635731a67217a59"' "$lock"
+          done
+          git diff --exit-code -- packages/tomo-engine/Package.resolved native/ios/Package.resolved
+
+      - name: The spatial cases ran
+        run: |
+          for name in testOnlyContentRefusalsAreRemembered testTheProbeRefusesATrackThatNeverRendersForTheProcess testPlainTrueHDStaysOnTheTranscoder testDTSCoreStaysOnTheTranscoder testEachFailedSessionLeavesItsReplacementOnFLAC testASpatialSegmentAheadYieldsToVideoRequestsOnTheWay testOnlyTheNewestVideoRequestAndItsNeighboursReassert; do
+            grep -E "Test Case .*SpatialAudioTests[ .]$name.*passed" packages/tomo-engine/.build/test.log
+          done
+          grep -E "Test Case .*SpatialAudioTests" packages/tomo-engine/.build/test.log
+
+      - name: Compile engine for Apple TV
+        run: >-
+          swift build --package-path packages/tomo-engine --target TomoEngine
+          --scratch-path "$RUNNER_TEMP/tomo-tvos"
+          --triple arm64-apple-tvos16.4 --sdk "$(xcrun --sdk appletvos --show-sdk-path)"
+
+  archive:
+    if: github.repository == 'kristofferR/tomotv'
+    runs-on: macos-26
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      ARTIFACT_RECIPIENT: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEafGHMwP9NUowbsjvz5a1Rb6hAyTAfGTqVaeGTUexTH
+      CI: "1"
+      EXPO_TV: "1"
+      EXPO_NO_TELEMETRY: "1"
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      FORCE_BUNDLING: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - run: brew install age ffmpeg
+
+      - run: npm ci
+
+      - name: CocoaPods helper tests
+        run: ruby packages/tomo-engine/__tests__/spm-build-directory.test.rb
+
+      - name: Assemble tvOS project through Expo and CocoaPods
+        run: |
+          mkdir -p "$RUNNER_TEMP/tomo-private/evidence"
+          npx --no-install expo prebuild --clean --platform ios --no-install
+          pod install --project-directory=ios
+          grep -n "SpatialAudioCore" "ios/Pods/Target Support Files/Pods-TomoTV/Pods-TomoTV-frameworks.sh"
+          for dir in ios/TomoTV.xcworkspace/xcshareddata/swiftpm ios/Pods/Pods.xcodeproj/project.xcworkspace/xcshareddata/swiftpm; do
+            mkdir -p "$dir"
+            cp packages/tomo-engine/Package.resolved "$dir/Package.resolved"
+          done
+
+      - name: Archive unsigned tvOS Release app
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -workspace ios/TomoTV.xcworkspace -scheme TomoTV -configuration Release \
+            -sdk appletvos -destination 'generic/platform=tvOS' -jobs 2 \
+            -archivePath "$RUNNER_TEMP/tomo-private/TomoTV.xcarchive" \
+            -derivedDataPath "$RUNNER_TEMP/tomo-derived-data" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/tomo-source-packages" \
+            -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= DEVELOPMENT_TEAM= \
+            2>&1 | tee "$RUNNER_TEMP/tomo-private/evidence/archive.log"
+
+      - name: The app embeds the dynamic core and links it, not a static copy
+        run: |
+          app="$RUNNER_TEMP/tomo-private/TomoTV.xcarchive/Products/Applications/TomoTV.app"
+          evidence="$RUNNER_TEMP/tomo-private/evidence"
+          core="$app/Frameworks/SpatialAudioCore.framework/SpatialAudioCore"
+          ls -la "$app/Frameworks" | tee "$evidence/frameworks.txt"
+          file "$core" | tee "$evidence/core-file.txt"
+          grep -q "dynamically linked shared library" "$evidence/core-file.txt"
+          nm -gU "$core" | grep -c " _sab_" | tee "$evidence/core-exports.txt"
+          find "$app" -type f -perm -u+x -exec sh -c 'file "$1" | grep -q Mach-O && echo "$1"' _ {} \; > "$evidence/machos.txt"
+          linked=0
+          while read -r binary; do
+            [ "$binary" = "$core" ] && continue
+            if nm -gU "$binary" 2>/dev/null | grep -q " _sab_"; then
+              echo "static core symbols in $binary"
+              exit 1
+            fi
+            if otool -L "$binary" | grep -q "@rpath/SpatialAudioCore.framework/SpatialAudioCore"; then
+              echo "links the core: $binary"
+              linked=1
+            fi
+          done < "$evidence/machos.txt"
+          test "$linked" = 1
+          test -s "$app/main.jsbundle"
+          test -d "$app/PlugIns/TopShelf.appex"
+
+      - name: Zip the unsigned app for the device check
+        run: |
+          mkdir -p "$RUNNER_TEMP/tomo-app"
+          ditto -c -k --keepParent "$RUNNER_TEMP/tomo-private/TomoTV.xcarchive/Products/Applications/TomoTV.app" "$RUNNER_TEMP/tomo-app/TomoTV-unsigned-tvOS.zip"
+          cd "$RUNNER_TEMP/tomo-app"
+          shasum -a 256 TomoTV-unsigned-tvOS.zip > SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tomo-tvos-${{ env.CANDIDATE_SHA }}-unsigned
+          path: ${{ runner.temp }}/tomo-app/
+          if-no-files-found: error
+          retention-days: 1
