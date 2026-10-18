@@ -1280,6 +1280,45 @@ describe("useVideoPlayback (mounted)", () => {
       expect(mockProbeEmit).not.toHaveBeenCalledWith("fallback", expect.objectContaining({ to: "transcode" }));
     });
 
+    // Measured on Apple TV: the audio server restart that ends an APAC session also fails the player its reopen makes.
+    it("waits out the audio server restart behind a spatial refusal and reopens the engine, never the server", async () => {
+      jest.useFakeTimers({ doNotFake: ["queueMicrotask"] });
+      let renderer: TestRenderer.ReactTestRenderer | undefined;
+      const settle = async () => {
+        jest.advanceTimersByTime(1);
+        for (let hop = 0; hop < 30; hop++) await Promise.resolve();
+      };
+      try {
+        mockNeedsTranscoding.mockReturnValue(true);
+        mockCanRemux.mockResolvedValue(true);
+        (isLocalRemuxAvailable as jest.Mock).mockReturnValue(true);
+        const mounted = await mount({ videoId: "video-1" });
+        const { ref } = mounted;
+        renderer = mounted.renderer;
+        ref.current!.get().currentTimeRef.current = 42;
+        const fail = (subscribeEngineFailure as jest.Mock).mock.calls.at(-1)![1];
+        await act(async () => fail({ token: "token:http://127.0.0.1:9999/s/abc/master.m3u8", message: "spatial audio refused: Cannot Complete Action", spatialAudio: true }));
+        await act(settle);
+        expect(mockStartLocalRemux).toHaveBeenCalledTimes(2);
+
+        ref.current!.get().currentTimeRef.current = 42;
+        await act(async () => {
+          ref.current!.get().videoCallbacks.onError({ error: EXPIRED_AUDIO_SESSION } as never);
+        });
+        await act(async () => jest.advanceTimersByTime(AUDIO_RESET_WAIT_MS));
+        await act(settle);
+
+        expect(mockStartLocalRemux).toHaveBeenCalledTimes(3);
+        expect(mockStartLocalRemux.mock.calls.slice(1).map((call) => call[2])).toEqual([42, 42]);
+        expect(ref.current!.get().state).toMatchObject({ mode: "localRemux" });
+        expect(mockTranscodeUrl).not.toHaveBeenCalled();
+        expect(mockProbeEmit).not.toHaveBeenCalledWith("fallback", expect.objectContaining({ to: "transcode" }));
+      } finally {
+        await act(async () => renderer?.unmount());
+        jest.useRealTimers();
+      }
+    });
+
     it("keeps a below-realtime session that carries a server tier, instead of spending the file on the server lane", async () => {
       // The slow link is why a tier was declared. AVPlayer opens on that rung while the source
       // pull catches up, so handing the file to the server here would defeat the tier and pin
